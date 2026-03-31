@@ -65,7 +65,7 @@ def batch_iterator_alpaca(tokenize_instructions_fn, batch_size, eoi_toks):
 
 def batch_iterator_pile(tokenizer, batch_size, max_length):
     """Yields batches from the Pile dataset."""
-    dataset = load_dataset("monology/pile-uncopyrighted", split="train", streaming=True, trust_remote_code=True)
+    dataset = load_dataset("monology/pile-uncopyrighted", split="train", streaming=True)
 
     it_dataset = iter(dataset)
     while True:

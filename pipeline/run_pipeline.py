@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -22,10 +23,72 @@ from pipeline.submodules.refusal_calibration import (
 from pipeline.submodules.select_direction import get_refusal_scores, select_direction
 
 
+def _stable_digest(value):
+    serialized = json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _file_digest(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_manifest(manifest_path):
+    if not os.path.exists(manifest_path):
+        return None
+    with open(manifest_path, "r") as f:
+        return json.load(f)
+
+
+def _manifest_matches(manifest_path, expected_payload):
+    return _load_manifest(manifest_path) == expected_payload
+
+
+def _write_manifest(manifest_path, payload):
+    with open(manifest_path, "w") as f:
+        json.dump(payload, f, indent=4, ensure_ascii=False)
+
+
+def _instruction_list_signature(instructions):
+    return _stable_digest(instructions)
+
+
+def _dataset_signature(dataset):
+    normalized = [
+        {
+            "instruction": row["instruction"],
+            "category": row.get("category"),
+        }
+        for row in dataset
+    ]
+    return _stable_digest(normalized)
+
+
+def _get_direction_signature(cfg, intervention_label):
+    if intervention_label == "baseline":
+        return {"intervention_label": intervention_label}
+
+    direction_path = os.path.join(cfg.artifact_path(), "direction.pt")
+    direction_metadata_path = os.path.join(cfg.artifact_path(), "direction_metadata.json")
+    with open(direction_metadata_path, "r") as f:
+        direction_metadata = json.load(f)
+
+    return {
+        "intervention_label": intervention_label,
+        "direction_file_digest": _file_digest(direction_path),
+        "direction_metadata": direction_metadata,
+    }
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Run the refusal direction pipeline.")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the target model")
     parser.add_argument("--refusal_judge_model_path", type=str, default=None, help="Path to the Nemotron refusal judge model")
+    parser.add_argument("--refusal_judge_backend", type=str, choices=["vllm", "transformers"], default=None)
+    parser.add_argument("--refusal_judge_gpu_memory_utilization", type=float, default=None)
     parser.add_argument("--n_train", type=int, default=None)
     parser.add_argument("--n_val", type=int, default=None)
     parser.add_argument("--n_test", type=int, default=None)
@@ -37,6 +100,7 @@ def parse_arguments():
     parser.add_argument("--refusal_calibration_batch_size", type=int, default=None)
     parser.add_argument("--refusal_calibration_max_new_tokens", type=int, default=None)
     parser.add_argument("--disable_refusal_calibration_cache", action="store_true")
+    parser.add_argument("--disable_artifact_cache", action="store_true")
     return parser.parse_args()
 
 
@@ -55,6 +119,7 @@ def build_config_from_args(args):
         "completion_batch_size",
         "refusal_calibration_batch_size",
         "refusal_calibration_max_new_tokens",
+        "refusal_judge_gpu_memory_utilization",
     ]
     for field_name in override_fields:
         value = getattr(args, field_name)
@@ -62,8 +127,12 @@ def build_config_from_args(args):
             setattr(cfg, field_name, value)
 
     cfg.refusal_judge_model_path = args.refusal_judge_model_path
+    if args.refusal_judge_backend is not None:
+        cfg.refusal_judge_backend = args.refusal_judge_backend
     if args.disable_refusal_calibration_cache:
         cfg.reuse_refusal_calibration_cache = False
+    if args.disable_artifact_cache:
+        cfg.reuse_artifacts = False
     if os.environ.get("TOGETHER_API_KEY") is None and "llamaguard2" in cfg.jailbreak_eval_methodologies:
         cfg.jailbreak_eval_methodologies = tuple(m for m in cfg.jailbreak_eval_methodologies if m != "llamaguard2")
 
@@ -134,9 +203,20 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
 
     response_cache_exists = os.path.exists(calibration_paths["response_cache_path"])
     judged_cache_exists = os.path.exists(calibration_paths["judged_cache_path"])
+    response_cache_manifest = {
+        "model_path": cfg.model_path,
+        "split_signatures": {
+            split_name: _instruction_list_signature(instructions)
+            for split_name, instructions in split_to_instructions.items()
+        },
+        "max_new_tokens": cfg.refusal_calibration_max_new_tokens,
+    }
 
-    need_response_cache = not (cfg.reuse_refusal_calibration_cache and response_cache_exists)
-    need_judged_cache = not (cfg.reuse_refusal_calibration_cache and judged_cache_exists)
+    need_response_cache = not (
+        cfg.reuse_refusal_calibration_cache
+        and response_cache_exists
+        and _manifest_matches(calibration_paths["response_cache_manifest_path"], response_cache_manifest)
+    )
 
     if need_response_cache:
         cache_refusal_calibration_responses(
@@ -146,6 +226,20 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
             batch_size=cfg.completion_batch_size,
             max_new_tokens=cfg.refusal_calibration_max_new_tokens,
         )
+        _write_manifest(calibration_paths["response_cache_manifest_path"], response_cache_manifest)
+        response_cache_exists = True
+
+    judged_cache_manifest = {
+        "judge_model_path": cfg.refusal_judge_model_path,
+        "judge_backend": cfg.refusal_judge_backend,
+        "response_cache_file_digest": _file_digest(calibration_paths["response_cache_path"]) if response_cache_exists else None,
+    }
+
+    need_judged_cache = not (
+        cfg.reuse_refusal_calibration_cache
+        and judged_cache_exists
+        and _manifest_matches(calibration_paths["judged_cache_manifest_path"], judged_cache_manifest)
+    )
 
     if need_judged_cache:
         model_base.del_model()
@@ -154,6 +248,7 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
             input_path=calibration_paths["response_cache_path"],
             output_path=calibration_paths["judged_cache_path"],
         )
+        _write_manifest(calibration_paths["judged_cache_manifest_path"], judged_cache_manifest)
         model_base = construct_model_base(cfg.model_path)
 
     judged_payload = load_judged_refusal_cache(calibration_paths["judged_cache_path"])
@@ -179,8 +274,21 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
 
 
 def generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train):
+    import torch
+
     artifact_dir = os.path.join(cfg.artifact_path(), "generate_directions")
     os.makedirs(artifact_dir, exist_ok=True)
+    mean_diffs_path = os.path.join(artifact_dir, "mean_diffs.pt")
+    manifest_path = os.path.join(artifact_dir, "manifest.json")
+    manifest = {
+        "model_path": cfg.model_path,
+        "harmful_train_signature": _instruction_list_signature(harmful_train),
+        "harmless_train_signature": _instruction_list_signature(harmless_train),
+    }
+
+    if cfg.reuse_artifacts and os.path.exists(mean_diffs_path) and _manifest_matches(manifest_path, manifest):
+        print(f"Reusing cached candidate directions from {mean_diffs_path}")
+        return torch.load(mean_diffs_path, map_location=model_base.model.device)
 
     mean_diffs = generate_directions(
         model_base,
@@ -190,12 +298,37 @@ def generate_and_save_candidate_directions(cfg, model_base, harmful_train, harml
         batch_size=cfg.activation_batch_size,
     )
 
+    _write_manifest(manifest_path, manifest)
     return mean_diffs
 
 
 def select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions):
+    import torch
+
     artifact_dir = os.path.join(cfg.artifact_path(), "select_direction")
     os.makedirs(artifact_dir, exist_ok=True)
+    direction_path = os.path.join(cfg.artifact_path(), "direction.pt")
+    direction_metadata_path = os.path.join(cfg.artifact_path(), "direction_metadata.json")
+    manifest_path = os.path.join(artifact_dir, "manifest.json")
+    mean_diffs_path = os.path.join(cfg.artifact_path(), "generate_directions", "mean_diffs.pt")
+    manifest = {
+        "model_path": cfg.model_path,
+        "harmful_val_signature": _instruction_list_signature(harmful_val),
+        "harmless_val_signature": _instruction_list_signature(harmless_val),
+        "candidate_directions_file_digest": _file_digest(mean_diffs_path) if os.path.exists(mean_diffs_path) else None,
+    }
+
+    if (
+        cfg.reuse_artifacts
+        and os.path.exists(direction_path)
+        and os.path.exists(direction_metadata_path)
+        and _manifest_matches(manifest_path, manifest)
+    ):
+        print(f"Reusing cached selected direction from {direction_path}")
+        with open(direction_metadata_path, "r") as f:
+            metadata = json.load(f)
+        direction = torch.load(direction_path, map_location=model_base.model.device)
+        return metadata["pos"], metadata["layer"], direction
 
     pos, layer, direction = select_direction(
         model_base,
@@ -208,10 +341,8 @@ def select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candid
 
     with open(f"{cfg.artifact_path()}/direction_metadata.json", "w") as f:
         json.dump({"pos": pos, "layer": layer}, f, indent=4)
-
-    import torch
-
     torch.save(direction, f"{cfg.artifact_path()}/direction.pt")
+    _write_manifest(manifest_path, manifest)
 
     return pos, layer, direction
 
@@ -219,9 +350,22 @@ def select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candid
 def generate_and_save_completions_for_dataset(cfg, model_base, fwd_pre_hooks, fwd_hooks, intervention_label, dataset_name, dataset=None):
     completions_dir = os.path.join(cfg.artifact_path(), "completions")
     os.makedirs(completions_dir, exist_ok=True)
+    completions_path = os.path.join(completions_dir, f"{dataset_name}_{intervention_label}_completions.json")
+    manifest_path = os.path.join(completions_dir, f"{dataset_name}_{intervention_label}_completions_manifest.json")
 
     if dataset is None:
         dataset = load_dataset(dataset_name)
+
+    manifest = {
+        "model_path": cfg.model_path,
+        "dataset_signature": _dataset_signature(dataset),
+        "max_new_tokens": cfg.max_new_tokens,
+        "direction_signature": _get_direction_signature(cfg, intervention_label),
+    }
+
+    if cfg.reuse_artifacts and os.path.exists(completions_path) and _manifest_matches(manifest_path, manifest):
+        print(f"Reusing cached completions from {completions_path}")
+        return
 
     completions = model_base.generate_completions(
         dataset,
@@ -230,30 +374,57 @@ def generate_and_save_completions_for_dataset(cfg, model_base, fwd_pre_hooks, fw
         batch_size=cfg.completion_batch_size,
         max_new_tokens=cfg.max_new_tokens,
     )
-
-    with open(f"{cfg.artifact_path()}/completions/{dataset_name}_{intervention_label}_completions.json", "w") as f:
+    with open(completions_path, "w") as f:
         json.dump(completions, f, indent=4, ensure_ascii=False)
+    _write_manifest(manifest_path, manifest)
 
 
 def evaluate_completions_and_save_results_for_dataset(cfg, intervention_label, dataset_name, eval_methodologies):
-    with open(os.path.join(cfg.artifact_path(), f"completions/{dataset_name}_{intervention_label}_completions.json"), "r") as f:
+    evaluations_path = os.path.join(cfg.artifact_path(), "completions", f"{dataset_name}_{intervention_label}_evaluations.json")
+    completions_path = os.path.join(cfg.artifact_path(), f"completions/{dataset_name}_{intervention_label}_completions.json")
+    manifest_path = os.path.join(cfg.artifact_path(), "completions", f"{dataset_name}_{intervention_label}_evaluations_manifest.json")
+    manifest = {
+        "completions_file_digest": _file_digest(completions_path) if os.path.exists(completions_path) else None,
+        "methodologies": list(eval_methodologies),
+    }
+
+    if cfg.reuse_artifacts and os.path.exists(evaluations_path) and _manifest_matches(manifest_path, manifest):
+        print(f"Reusing cached evaluation from {evaluations_path}")
+        return
+
+    with open(completions_path, "r") as f:
         completions = json.load(f)
 
     evaluation = evaluate_jailbreak(
         completions=completions,
         methodologies=list(eval_methodologies),
-        evaluation_path=os.path.join(cfg.artifact_path(), "completions", f"{dataset_name}_{intervention_label}_evaluations.json"),
+        evaluation_path=evaluations_path,
     )
 
-    with open(f"{cfg.artifact_path()}/completions/{dataset_name}_{intervention_label}_evaluations.json", "w") as f:
+    with open(evaluations_path, "w") as f:
         json.dump(evaluation, f, indent=4, ensure_ascii=False)
+    _write_manifest(manifest_path, manifest)
 
 
 def evaluate_loss_for_datasets(cfg, model_base, fwd_pre_hooks, fwd_hooks, intervention_label):
     loss_eval_dir = os.path.join(cfg.artifact_path(), "loss_evals")
     os.makedirs(loss_eval_dir, exist_ok=True)
+    loss_eval_path = os.path.join(loss_eval_dir, f"{intervention_label}_loss_eval.json")
+    manifest_path = os.path.join(loss_eval_dir, f"{intervention_label}_loss_eval_manifest.json")
 
     on_distribution_completions_file_path = os.path.join(cfg.artifact_path(), "completions/harmless_baseline_completions.json")
+    manifest = {
+        "model_path": cfg.model_path,
+        "intervention_label": intervention_label,
+        "direction_signature": _get_direction_signature(cfg, intervention_label),
+        "ce_loss_batch_size": cfg.ce_loss_batch_size,
+        "ce_loss_n_batches": cfg.ce_loss_n_batches,
+        "on_distribution_completions_digest": _file_digest(on_distribution_completions_file_path) if os.path.exists(on_distribution_completions_file_path) else None,
+    }
+
+    if cfg.reuse_artifacts and os.path.exists(loss_eval_path) and _manifest_matches(manifest_path, manifest):
+        print(f"Reusing cached loss evaluation from {loss_eval_path}")
+        return
 
     loss_evals = evaluate_loss(
         model_base,
@@ -263,9 +434,9 @@ def evaluate_loss_for_datasets(cfg, model_base, fwd_pre_hooks, fwd_hooks, interv
         n_batches=cfg.ce_loss_n_batches,
         completions_file_path=on_distribution_completions_file_path,
     )
-
-    with open(f"{cfg.artifact_path()}/loss_evals/{intervention_label}_loss_eval.json", "w") as f:
+    with open(loss_eval_path, "w") as f:
         json.dump(loss_evals, f, indent=4, ensure_ascii=False)
+    _write_manifest(manifest_path, manifest)
 
 
 def run_pipeline(cfg: Config):

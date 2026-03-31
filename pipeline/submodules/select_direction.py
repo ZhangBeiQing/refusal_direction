@@ -82,10 +82,11 @@ def plot_refusal_scores(
 
     # Add a trace for each position to extract
     for i in range(-n_pos, 0):
+        token_label = token_labels[i] if len(token_labels) >= n_pos else "<tok>"
         ax.plot(
             list(range(n_layer)),
             refusal_scores[i].cpu().numpy(),
-            label=f'{i}: {repr(token_labels[i])}'
+            label=f'{i}: {repr(token_label)}'
         )
 
     if baseline_refusal_score is not None:
@@ -190,10 +191,15 @@ def select_direction(
             refusal_scores = get_refusal_scores(model_base.model, harmless_instructions, model_base.tokenize_instructions_fn, model_base.refusal_toks, fwd_pre_hooks=fwd_pre_hooks, fwd_hooks=fwd_hooks, batch_size=batch_size)
             steering_refusal_scores[source_pos, source_layer] = refusal_scores.mean().item()
 
+    token_labels = [
+        model_base.tokenizer.decode([tok], skip_special_tokens=False)
+        for tok in model_base.eoi_toks
+    ]
+
     plot_refusal_scores(
         refusal_scores=ablation_refusal_scores,
         baseline_refusal_score=baseline_refusal_scores_harmful.mean().item(),
-        token_labels=model_base.tokenizer.batch_decode(model_base.eoi_toks),
+        token_labels=token_labels,
         title='Ablating direction on harmful instructions',
         artifact_dir=artifact_dir,
         artifact_name='ablation_scores'
@@ -202,7 +208,7 @@ def select_direction(
     plot_refusal_scores(
         refusal_scores=steering_refusal_scores,
         baseline_refusal_score=baseline_refusal_scores_harmless.mean().item(),
-        token_labels=model_base.tokenizer.batch_decode(model_base.eoi_toks),
+        token_labels=token_labels,
         title='Adding direction on harmless instructions',
         artifact_dir=artifact_dir,
         artifact_name='actadd_scores'
@@ -211,7 +217,7 @@ def select_direction(
     plot_refusal_scores(
         refusal_scores=ablation_kl_div_scores,
         baseline_refusal_score=0.0,
-        token_labels=model_base.tokenizer.batch_decode(model_base.eoi_toks),
+        token_labels=token_labels,
         title='KL Divergence when ablating direction on harmless instructions',
         artifact_dir=artifact_dir,
         artifact_name='kl_div_scores'

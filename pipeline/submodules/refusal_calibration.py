@@ -1,5 +1,6 @@
 import argparse
 import gc
+import importlib.util
 import json
 import os
 import subprocess
@@ -56,7 +57,9 @@ def get_refusal_calibration_paths(cfg) -> Dict[str, str]:
     return {
         "artifact_dir": artifact_dir,
         "response_cache_path": os.path.join(artifact_dir, "response_cache.json"),
+        "response_cache_manifest_path": os.path.join(artifact_dir, "response_cache_manifest.json"),
         "judged_cache_path": os.path.join(artifact_dir, "judged_cache.json"),
+        "judged_cache_manifest_path": os.path.join(artifact_dir, "judged_cache_manifest.json"),
         "summary_path": os.path.join(artifact_dir, "summary.json"),
     }
 
@@ -119,9 +122,67 @@ def _parse_refusal_label(raw_text: str, response: str) -> int:
     return _fallback_refusal_label(response)
 
 
+def _find_bundled_nccl_library():
+    spec = importlib.util.find_spec("nvidia.nccl")
+    if spec is None or not getattr(spec, "submodule_search_locations", None):
+        return None
+
+    for location in spec.submodule_search_locations:
+        candidate = os.path.join(location, "lib", "libnccl.so.2")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _configure_nemotron_vllm_env():
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+    os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+    os.environ.setdefault("NCCL_IGNORE_DISABLED_P2P", "1")
+    os.environ.setdefault("NCCL_SOCKET_IFNAME", "eth0,lo")
+    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    os.environ.setdefault("VLLM_DISABLE_PYNCCL", "1")
+
+    bundled_nccl = _find_bundled_nccl_library()
+    if bundled_nccl is not None:
+        os.environ.setdefault("VLLM_NCCL_SO_PATH", bundled_nccl)
+
+
+def _build_nemotron_prompts(records, tokenizer):
+    prompts = []
+    for record in records:
+        prompt = REFUSAL_JUDGE_PROMPT.format(
+            instruction=record["instruction"],
+            response=record["response"],
+        )
+        if getattr(tokenizer, "chat_template", None):
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        prompts.append(prompt)
+    return prompts
+
+
+def _write_judge_results(payload, flat_examples, judged_outputs, output_path: str):
+    for (split_name, record_idx, record), judge_output in zip(flat_examples, judged_outputs):
+        label = _parse_refusal_label(judge_output, record["response"])
+        payload["splits"][split_name][record_idx]["judge_output"] = judge_output
+        payload["splits"][split_name][record_idx]["is_refusal"] = int(label)
+
+    with open(output_path, "w") as f:
+        json.dump(payload, f, indent=4, ensure_ascii=False)
+
+    return output_path
+
+
 def judge_refusal_cache_with_nemotron(input_path: str, output_path: str, judge_model_path: str, batch_size: int = 16):
+    _configure_nemotron_vllm_env()
+
     from vllm import LLM, SamplingParams
     from vllm.distributed.parallel_state import destroy_model_parallel
+    from transformers import AutoTokenizer
 
     with open(input_path, "r") as f:
         payload = json.load(f)
@@ -131,35 +192,26 @@ def judge_refusal_cache_with_nemotron(input_path: str, output_path: str, judge_m
         for record_idx, record in enumerate(records):
             flat_examples.append((split_name, record_idx, record))
 
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=4, stop=["\n"])
+    tokenizer = AutoTokenizer.from_pretrained(judge_model_path, trust_remote_code=True)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=8)
     llm = LLM(
         model=judge_model_path,
         tensor_parallel_size=1,
         trust_remote_code=True,
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=float(os.environ.get("REFUSAL_JUDGE_GPU_MEMORY_UTILIZATION", "0.6")),
         max_model_len=4096,
         enforce_eager=True,
+        disable_custom_all_reduce=True,
     )
 
+    judged_outputs = []
     for start_idx in range(0, len(flat_examples), batch_size):
         batch = flat_examples[start_idx:start_idx + batch_size]
-        prompts = [
-            REFUSAL_JUDGE_PROMPT.format(
-                instruction=record["instruction"],
-                response=record["response"],
-            )
-            for _, _, record in batch
-        ]
+        prompts = _build_nemotron_prompts([record for _, _, record in batch], tokenizer)
         outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
 
-        for (split_name, record_idx, record), output in zip(batch, outputs):
-            judge_output = output.outputs[0].text.strip()
-            label = _parse_refusal_label(judge_output, record["response"])
-            payload["splits"][split_name][record_idx]["judge_output"] = judge_output
-            payload["splits"][split_name][record_idx]["is_refusal"] = int(label)
-
-    with open(output_path, "w") as f:
-        json.dump(payload, f, indent=4, ensure_ascii=False)
+        for output in outputs:
+            judged_outputs.append(output.outputs[0].text.strip())
 
     destroy_model_parallel()
     del llm
@@ -168,7 +220,49 @@ def judge_refusal_cache_with_nemotron(input_path: str, output_path: str, judge_m
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-    return output_path
+    return _write_judge_results(payload, flat_examples, judged_outputs, output_path)
+
+
+def judge_refusal_cache_with_nemotron_transformers(
+    input_path: str,
+    output_path: str,
+    judge_model_path: str,
+    batch_size: int = 8,
+):
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    with open(input_path, "r") as f:
+        payload = json.load(f)
+
+    flat_examples = []
+    for split_name, records in payload["splits"].items():
+        for record_idx, record in enumerate(records):
+            flat_examples.append((split_name, record_idx, record))
+
+    tokenizer = AutoTokenizer.from_pretrained(judge_model_path, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        judge_model_path,
+        trust_remote_code=True,
+        device_map="auto",
+        dtype="auto",
+    ).eval()
+
+    judged_outputs = []
+    for start_idx in range(0, len(flat_examples), batch_size):
+        batch = flat_examples[start_idx:start_idx + batch_size]
+        prompts = _build_nemotron_prompts([record for _, _, record in batch], tokenizer)
+        tokenized = tokenizer(prompts, padding=True, return_tensors="pt").to(model.device)
+        generated = model.generate(**tokenized, max_new_tokens=8, do_sample=False)
+        generated = generated[:, tokenized["input_ids"].shape[1]:]
+        judged_outputs.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
+
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+    return _write_judge_results(payload, flat_examples, [x.strip() for x in judged_outputs], output_path)
 
 
 def run_refusal_judge_subprocess(cfg, input_path: str, output_path: str):
@@ -186,8 +280,23 @@ def run_refusal_judge_subprocess(cfg, input_path: str, output_path: str):
         cfg.refusal_judge_model_path,
         "--batch_size",
         str(cfg.refusal_calibration_batch_size),
+        "--backend",
+        cfg.refusal_judge_backend,
     ]
-    subprocess.run(command, check=True)
+    env = os.environ.copy()
+    if cfg.refusal_judge_backend == "vllm":
+        env.setdefault("HF_HUB_OFFLINE", "1")
+        env.setdefault("HF_DATASETS_OFFLINE", "1")
+        env.setdefault("NCCL_P2P_DISABLE", "1")
+        env.setdefault("NCCL_IGNORE_DISABLED_P2P", "1")
+        env.setdefault("NCCL_SOCKET_IFNAME", "eth0,lo")
+        env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        env.setdefault("VLLM_DISABLE_PYNCCL", "1")
+        env["REFUSAL_JUDGE_GPU_MEMORY_UTILIZATION"] = str(cfg.refusal_judge_gpu_memory_utilization)
+        bundled_nccl = _find_bundled_nccl_library()
+        if bundled_nccl is not None:
+            env.setdefault("VLLM_NCCL_SO_PATH", bundled_nccl)
+    subprocess.run(command, check=True, env=env)
 
 
 def derive_filtered_splits_and_refusal_toks(judged_payload, tokenizer, cfg, fallback_refusal_toks: List[int]):
@@ -269,10 +378,15 @@ def main():
     parser.add_argument("--output_path", required=True)
     parser.add_argument("--judge_model_path", required=True)
     parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--backend", choices=["vllm", "transformers"], default="vllm")
     args = parser.parse_args()
 
     if args.mode == "judge":
-        judge_refusal_cache_with_nemotron(
+        judge_fn = judge_refusal_cache_with_nemotron
+        if args.backend == "transformers":
+            judge_fn = judge_refusal_cache_with_nemotron_transformers
+
+        judge_fn(
             input_path=args.input_path,
             output_path=args.output_path,
             judge_model_path=args.judge_model_path,

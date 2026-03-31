@@ -22,12 +22,15 @@ class Config:
     activation_batch_size: int = 4
     completion_batch_size: int = 4
     refusal_judge_model_path: Optional[str] = None
+    refusal_judge_backend: str = "vllm"
+    refusal_judge_gpu_memory_utilization: float = 0.6
     refusal_calibration_batch_size: int = 16
     refusal_calibration_max_new_tokens: int = 96
     refusal_token_max_candidates: int = 8
     refusal_token_min_examples: int = 2
     refusal_token_min_precision: float = 0.8
     reuse_refusal_calibration_cache: bool = True
+    reuse_artifacts: bool = True
 
     def artifact_path(self) -> str:
         return os.path.join(os.path.dirname(os.path.realpath(__file__)), "runs", self.model_alias)
