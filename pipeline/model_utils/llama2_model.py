@@ -92,7 +92,7 @@ class Llama2Model(ModelBase):
 
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             trust_remote_code=True,
             device_map="auto",
         ).eval()

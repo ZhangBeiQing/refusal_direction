@@ -1,8 +1,8 @@
-
 import os
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
+
 
 @dataclass
 class Config:
@@ -13,12 +13,21 @@ class Config:
     n_val: int = 32
     filter_train: bool = True
     filter_val: bool = True
-    evaluation_datasets: Tuple[str] = ("jailbreakbench",)
+    evaluation_datasets: Tuple[str, ...] = ("jailbreakbench",)
     max_new_tokens: int = 512
-    jailbreak_eval_methodologies: Tuple[str] = ("substring_matching", "llamaguard2")
-    refusal_eval_methodologies: Tuple[str] = ("substring_matching",)
+    jailbreak_eval_methodologies: Tuple[str, ...] = ("substring_matching", "llamaguard2")
+    refusal_eval_methodologies: Tuple[str, ...] = ("substring_matching",)
     ce_loss_batch_size: int = 2
     ce_loss_n_batches: int = 2048
+    activation_batch_size: int = 4
+    completion_batch_size: int = 4
+    refusal_judge_model_path: Optional[str] = None
+    refusal_calibration_batch_size: int = 16
+    refusal_calibration_max_new_tokens: int = 96
+    refusal_token_max_candidates: int = 8
+    refusal_token_min_examples: int = 2
+    refusal_token_min_precision: float = 0.8
+    reuse_refusal_calibration_cache: bool = True
 
     def artifact_path(self) -> str:
         return os.path.join(os.path.dirname(os.path.realpath(__file__)), "runs", self.model_alias)

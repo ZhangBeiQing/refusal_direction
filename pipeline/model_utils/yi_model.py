@@ -100,7 +100,7 @@ class YiModel(ModelBase):
     def _load_model(self, model_path, dtype=torch.float16):
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map="auto",
         ).eval()
 
