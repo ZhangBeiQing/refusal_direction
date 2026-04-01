@@ -7,7 +7,7 @@ from torch import Tensor
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from typing import List
 
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ENGLISH_OUTPUT_SYSTEM_PROMPT, ModelBase
 from pipeline.utils.utils import get_orthogonalized_matrix
 
 GLM_CHAT_TEMPLATE_WITH_SYSTEM = """<|system|>
@@ -20,8 +20,6 @@ GLM_CHAT_TEMPLATE = """<|user|>
 """
 
 GLM_TEMPLATE_SENTINEL = "<<GLM_INSTRUCTION_SENTINEL>>"
-
-
 def _resolve_glm_text_model(model):
     if hasattr(model, "model") and hasattr(model.model, "layers"):
         return model.model
@@ -34,11 +32,20 @@ def _apply_chat_template(tokenizer, messages, add_generation_prompt: bool):
     if not getattr(tokenizer, "chat_template", None):
         raise TypeError("Tokenizer does not expose a chat template.")
 
-    return tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=add_generation_prompt,
-    )
+    try:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            enable_thinking=False,
+        )
+    except TypeError:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs={"enable_thinking": False},
+        )
 
 
 def format_instruction_glm_chat(
@@ -174,7 +181,7 @@ class GLMModel(ModelBase):
         return functools.partial(
             tokenize_instructions_glm_chat,
             tokenizer=self.tokenizer,
-            system=None,
+            system=ENGLISH_OUTPUT_SYSTEM_PROMPT,
             include_trailing_whitespace=True,
         )
 
@@ -184,7 +191,7 @@ class GLMModel(ModelBase):
                 instruction=GLM_TEMPLATE_SENTINEL,
                 tokenizer=self.tokenizer,
                 output=None,
-                system=None,
+                system=ENGLISH_OUTPUT_SYSTEM_PROMPT,
                 include_trailing_whitespace=True,
             )
             suffix = formatted_prompt.split(GLM_TEMPLATE_SENTINEL, 1)[-1]

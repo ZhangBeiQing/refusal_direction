@@ -8,7 +8,7 @@ from typing import List
 from jaxtyping import Float
 
 from pipeline.utils.utils import get_orthogonalized_matrix
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ENGLISH_OUTPUT_SYSTEM_PROMPT, ModelBase
 
 # Gemma chat template is based on
 # - Official Gemma documentation: https://ai.google.dev/gemma/docs/formatting
@@ -27,9 +27,9 @@ def format_instruction_gemma_chat(
     include_trailing_whitespace: bool=True,
 ):
     if system is not None:
-        raise ValueError("System prompts are not supported for Gemma models.")
-    else:
-        formatted_instruction = GEMMA_CHAT_TEMPLATE.format(instruction=instruction)
+        instruction = f"{system}\n\n{instruction}"
+
+    formatted_instruction = GEMMA_CHAT_TEMPLATE.format(instruction=instruction)
 
     if not include_trailing_whitespace:
         formatted_instruction = formatted_instruction.rstrip()
@@ -102,7 +102,12 @@ class GemmaModel(ModelBase):
         return tokenizer
 
     def _get_tokenize_instructions_fn(self):
-        return functools.partial(tokenize_instructions_gemma_chat, tokenizer=self.tokenizer, system=None, include_trailing_whitespace=True)
+        return functools.partial(
+            tokenize_instructions_gemma_chat,
+            tokenizer=self.tokenizer,
+            system=ENGLISH_OUTPUT_SYSTEM_PROMPT,
+            include_trailing_whitespace=True,
+        )
 
     def _get_eoi_toks(self):
         return self.tokenizer.encode(GEMMA_CHAT_TEMPLATE.split("{instruction}")[-1], add_special_tokens=False)

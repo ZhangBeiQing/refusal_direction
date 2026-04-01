@@ -8,13 +8,11 @@ from typing import List
 from jaxtyping import Float
 
 from pipeline.utils.utils import get_orthogonalized_matrix
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ENGLISH_OUTPUT_SYSTEM_PROMPT, ModelBase
 
 # Yi chat templates are based on
 # - Official tokenizer config: https://huggingface.co/01-ai/Yi-6B-Chat/blob/main/tokenizer_config.json
 # - Replicate default prompt template: https://replicate.com/01-ai/yi-6b-chat
-
-SAMPLE_SYSTEM_PROMPT = """You are a helpful assistant."""
 
 YI_CHAT_TEMPLATE_WITH_SYSTEM = """<|im_start|>system
 {system}<|im_end|>
@@ -120,7 +118,12 @@ class YiModel(ModelBase):
         return tokenizer
 
     def _get_tokenize_instructions_fn(self):
-        return functools.partial(tokenize_instructions_yi_chat, tokenizer=self.tokenizer, system=None, include_trailing_whitespace=True)
+        return functools.partial(
+            tokenize_instructions_yi_chat,
+            tokenizer=self.tokenizer,
+            system=ENGLISH_OUTPUT_SYSTEM_PROMPT,
+            include_trailing_whitespace=True,
+        )
 
     def _get_eoi_toks(self):
         return self.tokenizer.encode(YI_CHAT_TEMPLATE.split("{instruction}")[-1])

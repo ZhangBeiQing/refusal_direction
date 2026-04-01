@@ -204,6 +204,7 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
     response_cache_exists = os.path.exists(calibration_paths["response_cache_path"])
     judged_cache_exists = os.path.exists(calibration_paths["judged_cache_path"])
     response_cache_manifest = {
+        "response_format_version": "force_english_all_models_v3",
         "model_path": cfg.model_path,
         "split_signatures": {
             split_name: _instruction_list_signature(instructions)

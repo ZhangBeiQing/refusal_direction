@@ -10,6 +10,8 @@ from jaxtyping import Float
 
 from pipeline.utils.hook_utils import add_hooks
 
+ENGLISH_OUTPUT_SYSTEM_PROMPT = "You are a helpful assistant. Respond in English."
+
 
 class ModelBase(ABC):
     def __init__(self, model_name_or_path: str):
@@ -29,6 +31,12 @@ class ModelBase(ABC):
         if hasattr(self, "model") and self.model is not None:
             del self.model
             self.model = None
+        # These attributes keep references to model submodules on GPU.
+        # Clear them as well so the base model can actually be released
+        # before loading another model in the same process.
+        self.model_block_modules = None
+        self.model_attn_modules = None
+        self.model_mlp_modules = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

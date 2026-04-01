@@ -8,7 +8,7 @@ from torch import Tensor
 from jaxtyping import Int, Float
 
 from pipeline.utils.utils import get_orthogonalized_matrix
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ENGLISH_OUTPUT_SYSTEM_PROMPT, ModelBase
 
 # Llama 3 chat templates are based on
 # - https://llama.meta.com/docs/model-cards-and-prompt-formats/meta-llama-3/
@@ -115,7 +115,12 @@ class Llama3Model(ModelBase):
         return tokenizer
 
     def _get_tokenize_instructions_fn(self):
-        return functools.partial(tokenize_instructions_llama3_chat, tokenizer=self.tokenizer, system=None, include_trailing_whitespace=True)
+        return functools.partial(
+            tokenize_instructions_llama3_chat,
+            tokenizer=self.tokenizer,
+            system=ENGLISH_OUTPUT_SYSTEM_PROMPT,
+            include_trailing_whitespace=True,
+        )
 
     def _get_eoi_toks(self):
         return self.tokenizer.encode(LLAMA3_CHAT_TEMPLATE.split("{instruction}")[-1], add_special_tokens=False)

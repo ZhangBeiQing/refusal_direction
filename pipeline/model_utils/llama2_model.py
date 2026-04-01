@@ -8,14 +8,10 @@ from torch import Tensor
 from jaxtyping import Int, Float
 
 from pipeline.utils.utils import get_orthogonalized_matrix
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ENGLISH_OUTPUT_SYSTEM_PROMPT, ModelBase
 
 # Llama 2 chat templates are based on
 # - https://github.com/centerforaisafety/HarmBench/blob/main/baselines/model_utils.py
-
-LLAMA2_DEFAULT_SYSTEM_PROMPT = """You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
-
-If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."""
 
 LLAMA2_CHAT_TEMPLATE = "[INST] {instruction} [/INST] "
 
@@ -30,8 +26,6 @@ def format_instruction_llama2_chat(
     include_trailing_whitespace: bool=True
 ):
     if system is not None:
-        if system == "default":
-            system = LLAMA2_DEFAULT_SYSTEM_PROMPT
         formatted_instruction = LLAMA2_CHAT_TEMPLATE_WITH_SYSTEM.format(instruction=instruction, system_prompt=system)
     else:
         formatted_instruction = LLAMA2_CHAT_TEMPLATE.format(instruction=instruction)
@@ -115,7 +109,12 @@ class Llama2Model(ModelBase):
         return tokenizer
 
     def _get_tokenize_instructions_fn(self):
-        return functools.partial(tokenize_instructions_llama2_chat, tokenizer=self.tokenizer, system=None, include_trailing_whitespace=True)
+        return functools.partial(
+            tokenize_instructions_llama2_chat,
+            tokenizer=self.tokenizer,
+            system=ENGLISH_OUTPUT_SYSTEM_PROMPT,
+            include_trailing_whitespace=True,
+        )
 
     def _get_eoi_toks(self):
         return self.tokenizer.encode(LLAMA2_CHAT_TEMPLATE.split("{instruction}")[-1], add_special_tokens=False)

@@ -7,10 +7,8 @@ from torch import Tensor
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from typing import List
 
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ENGLISH_OUTPUT_SYSTEM_PROMPT, ModelBase
 from pipeline.utils.utils import get_orthogonalized_matrix
-
-SAMPLE_SYSTEM_PROMPT = """You are a helpful assistant."""
 
 QWEN_CHAT_TEMPLATE_WITH_SYSTEM = """<|im_start|>system
 {system}<|im_end|>
@@ -227,7 +225,7 @@ class QwenModel(ModelBase):
         return functools.partial(
             tokenize_instructions_qwen_chat,
             tokenizer=self.tokenizer,
-            system=None,
+            system=ENGLISH_OUTPUT_SYSTEM_PROMPT,
             include_trailing_whitespace=True,
         )
 
@@ -237,7 +235,7 @@ class QwenModel(ModelBase):
                 instruction=QWEN_TEMPLATE_SENTINEL,
                 tokenizer=self.tokenizer,
                 output=None,
-                system=None,
+                system=ENGLISH_OUTPUT_SYSTEM_PROMPT,
                 include_trailing_whitespace=True,
             )
             suffix = formatted_prompt.split(QWEN_TEMPLATE_SENTINEL, 1)[-1]
