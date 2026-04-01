@@ -3,6 +3,7 @@
 本仓库用于复现论文 *Refusal in Language Models Is Mediated by a Single Direction*，并在当前代码基础上扩展了：
 
 - `Qwen3.5-4B` 适配
+- `GLM-4.7-Flash` 适配
 - `Nemotron-Content-Safety-Reasoning-4B` refusal judge 校准
 - 基于 artifact manifest 的续跑能力
 - 面向实际使用的 ablation-only 推理入口
@@ -49,7 +50,7 @@ export HF_TOKEN="<your_token>"
 export TOGETHER_API_KEY="<your_key>"
 ```
 
-当前适配 `Qwen3.5-4B` 需要 `transformers==5.4.0`。
+当前适配 `Qwen3.5-4B` 和 `GLM-4.7-Flash` 需要 `transformers==5.4.0`。
 
 ## 3. 目录说明
 
@@ -62,7 +63,7 @@ export TOGETHER_API_KEY="<your_key>"
 - `pipeline/run_ablation_inference.py`
   推理专用交互入口
 - `pipeline/submodules/refusal_calibration.py`
-  Qwen 响应缓存与 Nemotron refusal judge
+  基膜响应缓存与 Nemotron refusal judge
 - `pipeline/runs/<model_alias>/`
   每次实验的产物目录
 
@@ -79,6 +80,15 @@ python -m pipeline.run_pipeline --model_path <model_path>
 ```bash
 python -m pipeline.run_pipeline \
   --model_path /root/autodl-tmp/Qwen3.5-4B \
+  --refusal_judge_model_path /root/autodl-tmp/Nemotron-Content-Safety-Reasoning-4B \
+  --refusal_judge_backend vllm
+```
+
+如果切到 `GLM-4.7-Flash`，命令形式相同，例如：
+
+```bash
+python -m pipeline.run_pipeline \
+  --model_path /root/autodl-tmp/GLM-4.7-Flash \
   --refusal_judge_model_path /root/autodl-tmp/Nemotron-Content-Safety-Reasoning-4B \
   --refusal_judge_backend vllm
 ```
@@ -113,7 +123,7 @@ pipeline/runs/<model_alias>/
 主要包括：
 
 - `refusal_calibration/`
-  Qwen 响应缓存、Nemotron judge 结果、重建出的 refusal tokens
+  基膜响应缓存、Nemotron judge 结果、重建出的 refusal tokens
 - `generate_directions/`
   候选 direction 张量
 - `select_direction/`
@@ -151,6 +161,15 @@ python -m pipeline.prepare_inference_direction \
   --completion_batch_size 4 \
   --refusal_calibration_batch_size 2 \
   --refusal_calibration_max_new_tokens 64
+```
+
+`GLM-4.7-Flash` 的准备命令同样只需要替换 `--model_path`：
+
+```bash
+python -m pipeline.prepare_inference_direction \
+  --model_path /root/autodl-tmp/GLM-4.7-Flash \
+  --refusal_judge_model_path /root/autodl-tmp/Nemotron-Content-Safety-Reasoning-4B \
+  --refusal_judge_backend vllm
 ```
 
 这个入口和完整实验的区别是：
@@ -229,6 +248,8 @@ python scripts/chat_with_direction.py \
 - `position=-1`
 - `layer` 搜索
 - 只使用 `ablation`
+
+`GLM-4.7-Flash` 目前已经接入同一套适配层，但它的最优 `layer`/`position` 仍需要你在服务器上按同样流程重新搜索，不应直接沿用 Qwen 的经验结论。
 
 ## 8. 常见问题
 
