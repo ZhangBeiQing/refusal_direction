@@ -1,0 +1,21 @@
+{
+    "refusal_toks": [
+        40
+    ],
+    "decoded_refusal_toks": [
+        "I"
+    ],
+    "n_harmful_train": 8,
+    "n_harmful_val": 4,
+    "n_harmless_train": 8,
+    "n_harmless_val": 4,
+    "token_summaries": [
+        {
+            "token_id": 40,
+            "decoded": "I",
+            "refusal_count": 12,
+            "non_refusal_count": 0,
+            "precision": 1.0
+        }
+    ]
+}

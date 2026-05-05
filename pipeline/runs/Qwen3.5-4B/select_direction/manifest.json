@@ -1,0 +1,6 @@
+{
+    "model_path": "/root/autodl-tmp/Qwen3.5-4B",
+    "harmful_val_signature": "1789b3eb60cab837ab7bf7ece42867f4071f7cdf967844480c82cc66b4a238f5",
+    "harmless_val_signature": "28d69b64698355dced6cb8ac1f9b6a27991b1756b389c8358605508d96ed9be9",
+    "candidate_directions_file_digest": "a55658d13ffea7060450f32c31cedfa75870a308bcce65f3c36469e1b4173c5f"
+}

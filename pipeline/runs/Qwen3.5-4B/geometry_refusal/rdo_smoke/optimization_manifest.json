@@ -1,0 +1,21 @@
+{
+    "model_path": "/root/autodl-tmp/Qwen3.5-4B",
+    "harmful_train_signature": "cac607782344bdea9456a1501d3305e6a2abb1086b7127d8710865c25e2865ac",
+    "harmless_train_signature": "0188a9691e8ab4a24fa75c2d041e408bd1ce78fcf0a1c65a952b084e05539ef0",
+    "base_direction_digest": "31511a1cfec511e0646b06f7715e135875061f502bf0a9407121d5f2b2ca1964",
+    "add_layer": 23,
+    "config": {
+        "method": "rdo",
+        "cone_dim": 1,
+        "epochs": 1,
+        "batch_size": 1,
+        "effective_batch_size": 1,
+        "learning_rate": 0.001,
+        "target_max_new_tokens": 4,
+        "n_cone_samples": 0,
+        "ablation_lambda": 1.0,
+        "addition_lambda": 1.0,
+        "retain_lambda": 1.0,
+        "init_from_dim": true
+    }
+}

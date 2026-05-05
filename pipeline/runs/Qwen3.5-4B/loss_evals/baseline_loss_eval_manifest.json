@@ -1,0 +1,10 @@
+{
+    "model_path": "/root/autodl-tmp/Qwen3.5-4B",
+    "intervention_label": "baseline",
+    "direction_signature": {
+        "intervention_label": "baseline"
+    },
+    "ce_loss_batch_size": 1,
+    "ce_loss_n_batches": 2,
+    "on_distribution_completions_digest": "2c0dbc3295a5407d93a2edc1a6b1536b04cc02302eb32b266c620aa070d2d96f"
+}

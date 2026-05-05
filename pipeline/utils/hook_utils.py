@@ -49,7 +49,7 @@ def get_direction_ablation_input_pre_hook(direction: Tensor):
 
         direction = direction / (direction.norm(dim=-1, keepdim=True) + 1e-8)
         direction = direction.to(activation) 
-        activation -= (activation @ direction).unsqueeze(-1) * direction 
+        activation = activation - (activation @ direction).unsqueeze(-1) * direction
 
         if isinstance(input, tuple):
             return (activation, *input[1:])
@@ -68,7 +68,7 @@ def get_direction_ablation_output_hook(direction: Tensor):
 
         direction = direction / (direction.norm(dim=-1, keepdim=True) + 1e-8)
         direction = direction.to(activation)
-        activation -= (activation @ direction).unsqueeze(-1) * direction 
+        activation = activation - (activation @ direction).unsqueeze(-1) * direction
 
         if isinstance(output, tuple):
             return (activation, *output[1:])
@@ -98,8 +98,8 @@ def get_directional_patching_input_pre_hook(direction: Float[Tensor, "d_model"],
 
         direction = direction / (direction.norm(dim=-1, keepdim=True) + 1e-8)
         direction = direction.to(activation) 
-        activation -= (activation @ direction).unsqueeze(-1) * direction 
-        activation += coeff * direction
+        activation = activation - (activation @ direction).unsqueeze(-1) * direction
+        activation = activation + coeff * direction
 
         if isinstance(input, tuple):
             return (activation, *input[1:])
@@ -117,7 +117,7 @@ def get_activation_addition_input_pre_hook(vector: Float[Tensor, "d_model"], coe
             activation: Float[Tensor, "batch_size seq_len d_model"] = input
 
         vector = vector.to(activation)
-        activation += coeff * vector
+        activation = activation + coeff * vector
 
         if isinstance(input, tuple):
             return (activation, *input[1:])

@@ -1,0 +1,14 @@
+{
+  "terminal.integrated.defaultProfile.linux": "bash (refuse venv)",
+  "terminal.integrated.profiles.linux": {
+    "bash (refuse venv)": {
+      "path": "/bin/bash",
+      "args": [
+        "--rcfile",
+        "${workspaceFolder}/.vscode/refuse-bashrc"
+      ],
+      "icon": "terminal-bash"
+    }
+  },
+  "python.defaultInterpreterPath": "/root/venv/refuse/bin/python"
+}

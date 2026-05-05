@@ -2,7 +2,6 @@ import json
 import torch
 import functools
 import math
-import matplotlib.pyplot as plt
 import os
 
 from typing import List, Optional
@@ -75,6 +74,8 @@ def plot_refusal_scores(
     artifact_dir: str,
     artifact_name: str,
 ):
+    import matplotlib.pyplot as plt
+
     n_pos, n_layer = refusal_scores.shape
 
     # Create a figure and an axis

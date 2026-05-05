@@ -1,0 +1,13 @@
+{
+    "model_path": "/root/autodl-tmp/Qwen3.5-4B",
+    "dataset_signature": "4ea951e3b50857bffa7f107c49897f54eec9b45f8cbc5d39e2b79dd56e372a99",
+    "max_new_tokens": 256,
+    "direction_signature": {
+        "intervention_label": "actadd",
+        "direction_file_digest": "9e00c5ed880a37606595a00d8756e4ed729305a758c7999d347ccfcbff093c8f",
+        "direction_metadata": {
+            "pos": -1,
+            "layer": 23
+        }
+    }
+}

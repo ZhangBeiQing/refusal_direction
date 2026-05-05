@@ -11,8 +11,8 @@ from pipeline.model_utils.model_factory import construct_model_base
 from pipeline.utils.hook_utils import get_activation_addition_input_pre_hook, get_all_direction_ablation_hooks
 
 from pipeline.submodules.evaluate_jailbreak import evaluate_jailbreak
-from pipeline.submodules.evaluate_loss import evaluate_loss
 from pipeline.submodules.generate_directions import generate_directions
+from pipeline.submodules.geometry_refusal import optimize_refusal_geometry
 from pipeline.submodules.refusal_calibration import (
     cache_refusal_calibration_responses,
     derive_filtered_splits_and_refusal_toks,
@@ -21,6 +21,7 @@ from pipeline.submodules.refusal_calibration import (
     run_refusal_judge_subprocess,
 )
 from pipeline.submodules.select_direction import get_refusal_scores, select_direction
+from pipeline.utils.wandb_utils import wandb_log, wandb_run_context
 
 
 def _stable_digest(value):
@@ -101,6 +102,26 @@ def parse_arguments():
     parser.add_argument("--refusal_calibration_max_new_tokens", type=int, default=None)
     parser.add_argument("--disable_refusal_calibration_cache", action="store_true")
     parser.add_argument("--disable_artifact_cache", action="store_true")
+    parser.add_argument("--direction_method", choices=["dim", "rdo", "cone"], default=None)
+    parser.add_argument("--rdo_cone_dim", type=int, default=None)
+    parser.add_argument("--rdo_epochs", type=int, default=None)
+    parser.add_argument("--rdo_batch_size", type=int, default=None)
+    parser.add_argument("--rdo_effective_batch_size", type=int, default=None)
+    parser.add_argument("--rdo_learning_rate", type=float, default=None)
+    parser.add_argument("--rdo_target_max_new_tokens", type=int, default=None)
+    parser.add_argument("--rdo_n_cone_samples", type=int, default=None)
+    parser.add_argument("--rdo_ablation_lambda", type=float, default=None)
+    parser.add_argument("--rdo_addition_lambda", type=float, default=None)
+    parser.add_argument("--rdo_retain_lambda", type=float, default=None)
+    parser.add_argument("--rdo_random_init", action="store_true")
+    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
+    parser.add_argument("--wandb_project", type=str, default=None)
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_mode", choices=["online", "offline", "disabled"], default=None)
+    parser.add_argument("--wandb_name", type=str, default=None)
+    parser.add_argument("--wandb_group", type=str, default=None)
+    parser.add_argument("--wandb_tags", type=str, default=None, help="Comma-separated W&B tags.")
+    parser.add_argument("--wandb_dir", type=str, default=None)
     return parser.parse_args()
 
 
@@ -120,6 +141,17 @@ def build_config_from_args(args):
         "refusal_calibration_batch_size",
         "refusal_calibration_max_new_tokens",
         "refusal_judge_gpu_memory_utilization",
+        "direction_method",
+        "rdo_cone_dim",
+        "rdo_epochs",
+        "rdo_batch_size",
+        "rdo_effective_batch_size",
+        "rdo_learning_rate",
+        "rdo_target_max_new_tokens",
+        "rdo_n_cone_samples",
+        "rdo_ablation_lambda",
+        "rdo_addition_lambda",
+        "rdo_retain_lambda",
     ]
     for field_name in override_fields:
         value = getattr(args, field_name)
@@ -133,6 +165,24 @@ def build_config_from_args(args):
         cfg.reuse_refusal_calibration_cache = False
     if args.disable_artifact_cache:
         cfg.reuse_artifacts = False
+    if args.rdo_random_init:
+        cfg.rdo_init_from_dim = False
+    if args.wandb:
+        cfg.wandb_enabled = True
+    if args.wandb_project is not None:
+        cfg.wandb_project = args.wandb_project
+    if args.wandb_entity is not None:
+        cfg.wandb_entity = args.wandb_entity
+    if args.wandb_mode is not None:
+        cfg.wandb_mode = args.wandb_mode
+    if args.wandb_name is not None:
+        cfg.wandb_name = args.wandb_name
+    if args.wandb_group is not None:
+        cfg.wandb_group = args.wandb_group
+    if args.wandb_tags is not None:
+        cfg.wandb_tags = tuple(tag.strip() for tag in args.wandb_tags.split(",") if tag.strip())
+    if args.wandb_dir is not None:
+        cfg.wandb_dir = args.wandb_dir
     if os.environ.get("TOGETHER_API_KEY") is None and "llamaguard2" in cfg.jailbreak_eval_methodologies:
         cfg.jailbreak_eval_methodologies = tuple(m for m in cfg.jailbreak_eval_methodologies if m != "llamaguard2")
 
@@ -289,6 +339,7 @@ def generate_and_save_candidate_directions(cfg, model_base, harmful_train, harml
 
     if cfg.reuse_artifacts and os.path.exists(mean_diffs_path) and _manifest_matches(manifest_path, manifest):
         print(f"Reusing cached candidate directions from {mean_diffs_path}")
+        wandb_log({"artifact/generate_directions_reused": 1})
         return torch.load(mean_diffs_path, map_location=model_base.model.device)
 
     mean_diffs = generate_directions(
@@ -300,6 +351,7 @@ def generate_and_save_candidate_directions(cfg, model_base, harmful_train, harml
     )
 
     _write_manifest(manifest_path, manifest)
+    wandb_log({"artifact/generate_directions_reused": 0})
     return mean_diffs
 
 
@@ -310,6 +362,8 @@ def select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candid
     os.makedirs(artifact_dir, exist_ok=True)
     direction_path = os.path.join(cfg.artifact_path(), "direction.pt")
     direction_metadata_path = os.path.join(cfg.artifact_path(), "direction_metadata.json")
+    dim_direction_path = os.path.join(artifact_dir, "dim_direction.pt")
+    dim_direction_metadata_path = os.path.join(artifact_dir, "dim_direction_metadata.json")
     manifest_path = os.path.join(artifact_dir, "manifest.json")
     mean_diffs_path = os.path.join(cfg.artifact_path(), "generate_directions", "mean_diffs.pt")
     manifest = {
@@ -321,15 +375,33 @@ def select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candid
 
     if (
         cfg.reuse_artifacts
+        and os.path.exists(dim_direction_path)
+        and os.path.exists(dim_direction_metadata_path)
+        and _manifest_matches(manifest_path, manifest)
+    ):
+        print(f"Reusing cached DIM selected direction from {dim_direction_path}")
+        with open(dim_direction_metadata_path, "r") as f:
+            metadata = json.load(f)
+        direction = torch.load(dim_direction_path, map_location=model_base.model.device)
+        wandb_log({"artifact/select_direction_reused": 1, "direction/layer": metadata["layer"], "direction/pos": metadata["pos"]})
+        return metadata["pos"], metadata["layer"], direction
+
+    if (
+        cfg.reuse_artifacts
         and os.path.exists(direction_path)
         and os.path.exists(direction_metadata_path)
         and _manifest_matches(manifest_path, manifest)
     ):
-        print(f"Reusing cached selected direction from {direction_path}")
         with open(direction_metadata_path, "r") as f:
             metadata = json.load(f)
-        direction = torch.load(direction_path, map_location=model_base.model.device)
-        return metadata["pos"], metadata["layer"], direction
+        if metadata.get("method", "dim") == "dim":
+            print(f"Reusing cached selected direction from {direction_path}")
+            direction = torch.load(direction_path, map_location=model_base.model.device)
+            with open(dim_direction_metadata_path, "w") as f:
+                json.dump({"pos": metadata["pos"], "layer": metadata["layer"], "method": "dim"}, f, indent=4)
+            torch.save(direction, dim_direction_path)
+            wandb_log({"artifact/select_direction_reused": 1, "direction/layer": metadata["layer"], "direction/pos": metadata["pos"]})
+            return metadata["pos"], metadata["layer"], direction
 
     pos, layer, direction = select_direction(
         model_base,
@@ -340,12 +412,64 @@ def select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candid
         batch_size=cfg.activation_batch_size,
     )
 
-    with open(f"{cfg.artifact_path()}/direction_metadata.json", "w") as f:
-        json.dump({"pos": pos, "layer": layer}, f, indent=4)
-    torch.save(direction, f"{cfg.artifact_path()}/direction.pt")
+    dim_metadata = {"pos": pos, "layer": layer, "method": "dim"}
+    with open(dim_direction_metadata_path, "w") as f:
+        json.dump(dim_metadata, f, indent=4)
+    torch.save(direction, dim_direction_path)
+
+    if cfg.direction_method == "dim":
+        with open(direction_metadata_path, "w") as f:
+            json.dump(dim_metadata, f, indent=4)
+        torch.save(direction, direction_path)
     _write_manifest(manifest_path, manifest)
+    wandb_log({"artifact/select_direction_reused": 0, "direction/layer": layer, "direction/pos": pos})
 
     return pos, layer, direction
+
+
+def optimize_and_save_geometry_direction(cfg, model_base, harmful_train, harmless_train, pos, layer, dim_direction):
+    import torch
+
+    artifact_dir = os.path.join(cfg.artifact_path(), "geometry_refusal", cfg.direction_method)
+    result = optimize_refusal_geometry(
+        cfg=cfg,
+        model_base=model_base,
+        harmful_train=harmful_train,
+        harmless_train=harmless_train,
+        base_direction=dim_direction,
+        add_layer=layer,
+        artifact_dir=artifact_dir,
+    )
+
+    direction_path = os.path.join(cfg.artifact_path(), "direction.pt")
+    direction_metadata_path = os.path.join(cfg.artifact_path(), "direction_metadata.json")
+    metadata = {
+        "method": cfg.direction_method,
+        "pos": pos,
+        "layer": layer,
+        "source_method": "dim",
+        "geometry_artifact_dir": artifact_dir,
+        "best_loss": result["best_loss"],
+        "reused": result["reused"],
+        "config": result["config"],
+    }
+    if cfg.direction_method == "cone":
+        metadata["cone_dim"] = int(result["basis"].shape[0])
+        metadata["direction_basis_index"] = 0
+
+    torch.save(result["direction"], direction_path)
+    with open(direction_metadata_path, "w") as f:
+        json.dump(metadata, f, indent=4, ensure_ascii=False)
+    wandb_log(
+        {
+            "direction/layer": layer,
+            "direction/pos": pos,
+            "geometry_refusal/best_loss": result["best_loss"],
+            "geometry_refusal/reused": int(result["reused"]),
+        }
+    )
+
+    return layer, result["direction"]
 
 
 def generate_and_save_completions_for_dataset(cfg, model_base, fwd_pre_hooks, fwd_hooks, intervention_label, dataset_name, dataset=None):
@@ -408,6 +532,8 @@ def evaluate_completions_and_save_results_for_dataset(cfg, intervention_label, d
 
 
 def evaluate_loss_for_datasets(cfg, model_base, fwd_pre_hooks, fwd_hooks, intervention_label):
+    from pipeline.submodules.evaluate_loss import evaluate_loss
+
     loss_eval_dir = os.path.join(cfg.artifact_path(), "loss_evals")
     os.makedirs(loss_eval_dir, exist_ok=True)
     loss_eval_path = os.path.join(loss_eval_dir, f"{intervention_label}_loss_eval.json")
@@ -441,62 +567,73 @@ def evaluate_loss_for_datasets(cfg, model_base, fwd_pre_hooks, fwd_hooks, interv
 
 
 def run_pipeline(cfg: Config):
-    model_base = construct_model_base(cfg.model_path)
+    with wandb_run_context(cfg):
+        model_base = construct_model_base(cfg.model_path)
 
-    harmful_train, harmless_train, harmful_val, harmless_val = load_and_sample_datasets(cfg)
+        harmful_train, harmless_train, harmful_val, harmless_val = load_and_sample_datasets(cfg)
 
-    if cfg.refusal_judge_model_path:
-        harmful_train, harmless_train, harmful_val, harmless_val, model_base = calibrate_refusal_proxy(
-            cfg,
-            model_base,
-            harmful_train,
-            harmless_train,
-            harmful_val,
-            harmless_val,
-        )
-    else:
-        harmful_train, harmless_train, harmful_val, harmless_val = filter_data(
-            cfg,
-            model_base,
-            harmful_train,
-            harmless_train,
-            harmful_val,
-            harmless_val,
-        )
+        if cfg.refusal_judge_model_path:
+            harmful_train, harmless_train, harmful_val, harmless_val, model_base = calibrate_refusal_proxy(
+                cfg,
+                model_base,
+                harmful_train,
+                harmless_train,
+                harmful_val,
+                harmless_val,
+            )
+        else:
+            harmful_train, harmless_train, harmful_val, harmless_val = filter_data(
+                cfg,
+                model_base,
+                harmful_train,
+                harmless_train,
+                harmful_val,
+                harmless_val,
+            )
 
-    candidate_directions = generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train)
-    pos, layer, direction = select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions)
+        candidate_directions = generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train)
+        pos, layer, direction = select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions)
+        if cfg.direction_method in ("rdo", "cone"):
+            layer, direction = optimize_and_save_geometry_direction(
+                cfg,
+                model_base,
+                harmful_train,
+                harmless_train,
+                pos,
+                layer,
+                direction,
+            )
 
-    baseline_fwd_pre_hooks, baseline_fwd_hooks = [], []
-    ablation_fwd_pre_hooks, ablation_fwd_hooks = get_all_direction_ablation_hooks(model_base, direction)
-    actadd_fwd_pre_hooks, actadd_fwd_hooks = [
-        (model_base.model_block_modules[layer], get_activation_addition_input_pre_hook(vector=direction, coeff=-1.0))
-    ], []
+        baseline_fwd_pre_hooks, baseline_fwd_hooks = [], []
+        ablation_fwd_pre_hooks, ablation_fwd_hooks = get_all_direction_ablation_hooks(model_base, direction)
+        actadd_fwd_pre_hooks, actadd_fwd_hooks = [
+            (model_base.model_block_modules[layer], get_activation_addition_input_pre_hook(vector=direction, coeff=-1.0))
+        ], []
 
-    for dataset_name in cfg.evaluation_datasets:
-        generate_and_save_completions_for_dataset(cfg, model_base, baseline_fwd_pre_hooks, baseline_fwd_hooks, "baseline", dataset_name)
-        generate_and_save_completions_for_dataset(cfg, model_base, ablation_fwd_pre_hooks, ablation_fwd_hooks, "ablation", dataset_name)
-        generate_and_save_completions_for_dataset(cfg, model_base, actadd_fwd_pre_hooks, actadd_fwd_hooks, "actadd", dataset_name)
+        for dataset_name in cfg.evaluation_datasets:
+            generate_and_save_completions_for_dataset(cfg, model_base, baseline_fwd_pre_hooks, baseline_fwd_hooks, "baseline", dataset_name)
+            generate_and_save_completions_for_dataset(cfg, model_base, ablation_fwd_pre_hooks, ablation_fwd_hooks, "ablation", dataset_name)
+            generate_and_save_completions_for_dataset(cfg, model_base, actadd_fwd_pre_hooks, actadd_fwd_hooks, "actadd", dataset_name)
 
-    for dataset_name in cfg.evaluation_datasets:
-        evaluate_completions_and_save_results_for_dataset(cfg, "baseline", dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
-        evaluate_completions_and_save_results_for_dataset(cfg, "ablation", dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
-        evaluate_completions_and_save_results_for_dataset(cfg, "actadd", dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
+        for dataset_name in cfg.evaluation_datasets:
+            evaluate_completions_and_save_results_for_dataset(cfg, "baseline", dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
+            evaluate_completions_and_save_results_for_dataset(cfg, "ablation", dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
+            evaluate_completions_and_save_results_for_dataset(cfg, "actadd", dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
 
-    harmless_test = random.sample(load_dataset_split(harmtype="harmless", split="test"), cfg.n_test)
+        harmless_test = random.sample(load_dataset_split(harmtype="harmless", split="test"), cfg.n_test)
 
-    generate_and_save_completions_for_dataset(cfg, model_base, baseline_fwd_pre_hooks, baseline_fwd_hooks, "baseline", "harmless", dataset=harmless_test)
-    actadd_refusal_pre_hooks, actadd_refusal_hooks = [
-        (model_base.model_block_modules[layer], get_activation_addition_input_pre_hook(vector=direction, coeff=+1.0))
-    ], []
-    generate_and_save_completions_for_dataset(cfg, model_base, actadd_refusal_pre_hooks, actadd_refusal_hooks, "actadd", "harmless", dataset=harmless_test)
+        generate_and_save_completions_for_dataset(cfg, model_base, baseline_fwd_pre_hooks, baseline_fwd_hooks, "baseline", "harmless", dataset=harmless_test)
+        actadd_refusal_pre_hooks, actadd_refusal_hooks = [
+            (model_base.model_block_modules[layer], get_activation_addition_input_pre_hook(vector=direction, coeff=+1.0))
+        ], []
+        generate_and_save_completions_for_dataset(cfg, model_base, actadd_refusal_pre_hooks, actadd_refusal_hooks, "actadd", "harmless", dataset=harmless_test)
 
-    evaluate_completions_and_save_results_for_dataset(cfg, "baseline", "harmless", eval_methodologies=cfg.refusal_eval_methodologies)
-    evaluate_completions_and_save_results_for_dataset(cfg, "actadd", "harmless", eval_methodologies=cfg.refusal_eval_methodologies)
+        evaluate_completions_and_save_results_for_dataset(cfg, "baseline", "harmless", eval_methodologies=cfg.refusal_eval_methodologies)
+        evaluate_completions_and_save_results_for_dataset(cfg, "actadd", "harmless", eval_methodologies=cfg.refusal_eval_methodologies)
 
-    evaluate_loss_for_datasets(cfg, model_base, baseline_fwd_pre_hooks, baseline_fwd_hooks, "baseline")
-    evaluate_loss_for_datasets(cfg, model_base, ablation_fwd_pre_hooks, ablation_fwd_hooks, "ablation")
-    evaluate_loss_for_datasets(cfg, model_base, actadd_fwd_pre_hooks, actadd_fwd_hooks, "actadd")
+        evaluate_loss_for_datasets(cfg, model_base, baseline_fwd_pre_hooks, baseline_fwd_hooks, "baseline")
+        evaluate_loss_for_datasets(cfg, model_base, ablation_fwd_pre_hooks, ablation_fwd_hooks, "ablation")
+        evaluate_loss_for_datasets(cfg, model_base, actadd_fwd_pre_hooks, actadd_fwd_hooks, "actadd")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@
 - `Qwen3.5-4B` 适配
 - `GLM-4.7-Flash` 适配
 - `Nemotron-Content-Safety-Reasoning-4B` refusal judge 校准
+- `The Geometry of Refusal` RDO / cone 方向优化入口
+- 可选 W&B 训练/实验记录
 - 基于 artifact manifest 的续跑能力
 - 面向实际使用的 ablation-only 推理入口
 
@@ -51,6 +53,7 @@ export TOGETHER_API_KEY="<your_key>"
 ```
 
 当前适配 `Qwen3.5-4B` 和 `GLM-4.7-Flash` 需要 `transformers==5.4.0`。
+如果要启用 W&B 记录，默认建议先用 `--wandb_mode offline`，日志会落到 `/root/autodl-tmp/wandb`。
 
 ## 3. 目录说明
 
@@ -58,6 +61,8 @@ export TOGETHER_API_KEY="<your_key>"
   数据集与 train/val/test 切分
 - `pipeline/run_pipeline.py`
   完整实验入口
+- `pipeline/submodules/geometry_refusal.py`
+  RDO / cone refusal geometry 优化
 - `pipeline/prepare_inference_direction.py`
   推理专用 direction 准备入口
 - `pipeline/run_ablation_inference.py`
@@ -66,6 +71,10 @@ export TOGETHER_API_KEY="<your_key>"
   基膜响应缓存与 Nemotron refusal judge
 - `pipeline/runs/<model_alias>/`
   每次实验的产物目录
+
+RDO / cone 集成说明见：
+
+- [docs/geometry_refusal_integration.md](docs/geometry_refusal_integration.md)
 
 ## 4. 完整实验怎么跑
 

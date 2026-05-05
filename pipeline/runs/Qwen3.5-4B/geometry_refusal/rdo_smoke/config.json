@@ -1,0 +1,14 @@
+{
+    "method": "rdo",
+    "cone_dim": 1,
+    "epochs": 1,
+    "batch_size": 1,
+    "effective_batch_size": 1,
+    "learning_rate": 0.001,
+    "target_max_new_tokens": 4,
+    "n_cone_samples": 0,
+    "ablation_lambda": 1.0,
+    "addition_lambda": 1.0,
+    "retain_lambda": 1.0,
+    "init_from_dim": true
+}

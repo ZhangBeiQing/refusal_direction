@@ -1,0 +1,8 @@
+{
+    "model_path": "/root/autodl-tmp/Qwen3.5-4B",
+    "dataset_signature": "13a01b9e8ec0845c5739102ff0b97eeaa086d765c6cffe61b1bf05de134c7c75",
+    "max_new_tokens": 256,
+    "direction_signature": {
+        "intervention_label": "baseline"
+    }
+}

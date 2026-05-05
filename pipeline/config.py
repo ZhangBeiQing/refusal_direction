@@ -31,6 +31,26 @@ class Config:
     refusal_token_min_precision: float = 0.8
     reuse_refusal_calibration_cache: bool = True
     reuse_artifacts: bool = True
+    direction_method: str = "dim"
+    rdo_cone_dim: int = 2
+    rdo_epochs: int = 1
+    rdo_batch_size: int = 1
+    rdo_effective_batch_size: int = 4
+    rdo_learning_rate: float = 1e-3
+    rdo_target_max_new_tokens: int = 30
+    rdo_n_cone_samples: int = 2
+    rdo_ablation_lambda: float = 1.0
+    rdo_addition_lambda: float = 1.0
+    rdo_retain_lambda: float = 1.0
+    rdo_init_from_dim: bool = True
+    wandb_enabled: bool = False
+    wandb_project: str = "refusal-direction"
+    wandb_entity: Optional[str] = None
+    wandb_mode: str = "offline"
+    wandb_name: Optional[str] = None
+    wandb_group: Optional[str] = None
+    wandb_tags: Tuple[str, ...] = ()
+    wandb_dir: Optional[str] = None
 
     def artifact_path(self) -> str:
         return os.path.join(os.path.dirname(os.path.realpath(__file__)), "runs", self.model_alias)
