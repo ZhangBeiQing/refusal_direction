@@ -132,7 +132,7 @@ pipeline/runs/<model_alias>/
 主要包括：
 
 - `refusal_calibration/`
-  基膜响应缓存、Nemotron judge 结果、重建出的 refusal tokens
+  基模响应缓存、Nemotron judge 结果、重建出的 refusal tokens
 - `generate_directions/`
   候选 direction 张量
 - `select_direction/`
@@ -205,6 +205,8 @@ python -m pipeline.prepare_inference_direction \
   --completion_batch_size 4 \
   --refusal_calibration_batch_size 2 \
   --refusal_calibration_max_new_tokens 64
+
+  建议n_train、n_val、activation_batch_size、completion_batch_size、refusal_calibration_max_new_tokens都用config中的默认值，这里只做小样本测试可行性
 ```
 
 `GLM-4.7-Flash` 的准备命令同样只需要替换 `--model_path`：

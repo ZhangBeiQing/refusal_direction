@@ -19,13 +19,13 @@ class Config:
     refusal_eval_methodologies: Tuple[str, ...] = ("substring_matching",)
     ce_loss_batch_size: int = 2
     ce_loss_n_batches: int = 2048
-    activation_batch_size: int = 4
+    activation_batch_size: int = 128
     completion_batch_size: int = 256
     refusal_judge_model_path: Optional[str] = None
     refusal_judge_backend: str = "vllm"
     refusal_judge_gpu_memory_utilization: float = 0.6
-    refusal_calibration_batch_size: int = 16
-    refusal_calibration_max_new_tokens: int = 96
+    refusal_calibration_batch_size: int = 128
+    refusal_calibration_max_new_tokens: int = 512
     refusal_token_max_candidates: int = 8
     refusal_token_min_examples: int = 2
     refusal_token_min_precision: float = 0.8
