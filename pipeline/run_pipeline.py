@@ -355,6 +355,10 @@ def load_and_sample_datasets(cfg):
     从 dataset/splits/ 目录加载 harmful / harmless 的 train 和 val 切分，
     然后按 Config 中配置的数量随机采样。
 
+    n_train / n_val 含义：
+      -1 或更小值 → 使用该 split 的全部数据
+      正数        → 随机采样该数量（固定种子 42）
+
     返回：
       harmful_train, harmless_train, harmful_val, harmless_val
       每个都是 list[str]（指令文本列表）
@@ -366,19 +370,22 @@ def load_and_sample_datasets(cfg):
     # harmful 和 harmless 是论文中定义的两类指令：
     #   harmful_train: 用于提取 refusal direction 的"有害"指令
     #   harmless_train: 用于对比的"无害"指令
-    harmful_train = random.sample(
+    def _sample(dataset, n):
+        return random.sample(dataset, n) if n > 0 else dataset
+
+    harmful_train = _sample(
         load_dataset_split(harmtype="harmful", split="train", instructions_only=True),
         cfg.n_train,
     )
-    harmless_train = random.sample(
+    harmless_train = _sample(
         load_dataset_split(harmtype="harmless", split="train", instructions_only=True),
         cfg.n_train,
     )
-    harmful_val = random.sample(
+    harmful_val = _sample(
         load_dataset_split(harmtype="harmful", split="val", instructions_only=True),
         cfg.n_val,
     )
-    harmless_val = random.sample(
+    harmless_val = _sample(
         load_dataset_split(harmtype="harmless", split="val", instructions_only=True),
         cfg.n_val,
     )

@@ -8,9 +8,9 @@ from typing import Optional, Tuple
 class Config:
     model_alias: str
     model_path: str
-    n_train: int = 128
+    n_train: int = -1
     n_test: int = 100
-    n_val: int = 32
+    n_val: int = -1
     filter_train: bool = True
     filter_val: bool = True
     evaluation_datasets: Tuple[str, ...] = ("jailbreakbench",)
@@ -20,7 +20,7 @@ class Config:
     ce_loss_batch_size: int = 2
     ce_loss_n_batches: int = 2048
     activation_batch_size: int = 4
-    completion_batch_size: int = 4
+    completion_batch_size: int = 256
     refusal_judge_model_path: Optional[str] = None
     refusal_judge_backend: str = "vllm"
     refusal_judge_gpu_memory_utilization: float = 0.6
