@@ -33,6 +33,7 @@ from pipeline.utils.hook_utils import (
     get_activation_addition_input_pre_hook,
     get_all_direction_ablation_hooks,
 )
+from pipeline.utils.logging import get_logger
 
 from pipeline.submodules.evaluate_jailbreak import evaluate_jailbreak
 from pipeline.submodules.generate_directions import generate_directions
@@ -46,6 +47,8 @@ from pipeline.submodules.refusal_calibration import (
 )
 from pipeline.submodules.select_direction import get_refusal_scores, select_direction
 from pipeline.utils.wandb_utils import wandb_log, wandb_run_context
+
+logger = get_logger("RunPipeline")
 
 
 # ============================================================================
@@ -506,6 +509,8 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
     )
 
     if need_response_cache:
+        logger.info("  [Step 3a] 生成响应缓存 (completion_batch_size=%d, max_new_tokens=%d)...",
+                    cfg.completion_batch_size, cfg.refusal_calibration_max_new_tokens)
         # 用目标模型逐批生成所有指令的响应，写入 JSON 文件
         cache_refusal_calibration_responses(
             model_base=model_base,
@@ -516,6 +521,8 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
         )
         _write_manifest(calibration_paths["response_cache_manifest_path"], response_cache_manifest)
         response_cache_exists = True
+    else:
+        logger.info("  [Step 3a] 复用已有响应缓存: %s", calibration_paths["response_cache_path"])
 
     # ---- 第 2 步：生成/复用 judged cache ----
     judged_cache_manifest = {
@@ -535,6 +542,8 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
     )
 
     if need_judged_cache:
+        logger.info("  [Step 3b] 运行 Nemotron judge (backend=%s, batch_size=%d)...",
+                    cfg.refusal_judge_backend, cfg.refusal_calibration_batch_size)
         # judge 模型和原模型同时占用显存可能 OOM，先卸载原模型
         model_base.del_model()
         # 在子进程中运行 judge 模型，完成后释放其显存
@@ -545,9 +554,13 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
         )
         _write_manifest(calibration_paths["judged_cache_manifest_path"], judged_cache_manifest)
         # judge 完成后重新加载原模型
+        logger.info("  [Step 3b] Judge 完成，重新加载目标模型...")
         model_base = construct_model_base(cfg.model_path)
+    else:
+        logger.info("  [Step 3b] 复用已有 judge 缓存: %s", calibration_paths["judged_cache_path"])
 
     # ---- 第 3 步：根据 judged 结果过滤样本并确定 refusal tokens ----
+    logger.info("  [Step 3c] 过滤样本并确定 refusal tokens...")
     judged_payload = load_judged_refusal_cache(calibration_paths["judged_cache_path"])
     split_to_filtered_instructions, refusal_toks, summary = (
         derive_filtered_splits_and_refusal_toks(
@@ -557,6 +570,7 @@ def calibrate_refusal_proxy(cfg, model_base, harmful_train, harmless_train, harm
             fallback_refusal_toks=model_base.refusal_toks,
         )
     )
+    logger.info("  [Step 3c] refusal_toks=%s", refusal_toks)
 
     # 保存校准摘要（包含每个 split 的过滤统计、选中的 refusal tokens 等信息）
     with open(calibration_paths["summary_path"], "w") as f:
