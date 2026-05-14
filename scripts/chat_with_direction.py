@@ -27,8 +27,12 @@ def parse_args():
     )
     parser.add_argument("--prompt", type=str, default=None, help="Single prompt to run.")
     parser.add_argument("--interactive", action="store_true", help="Start an interactive chat loop.")
-    parser.add_argument("--max_new_tokens", type=int, default=256, help="Maximum number of generated tokens.")
+    parser.add_argument("--max_new_tokens", type=int, default=4096, help="Maximum number of generated tokens.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature.")
+    parser.add_argument("--history_path", type=str, default=None, help="Load/save interactive chat history as JSON.")
+    parser.add_argument("--no_history", action="store_true", help="Do not include previous turns as context.")
+    parser.add_argument("--clear_history", action="store_true", help="Clear history_path before starting interactive chat.")
+    parser.add_argument("--debug_hooks", action="store_true", help="Print hook registration and call counts.")
     parser.add_argument(
         "--direction_path",
         type=str,
@@ -74,8 +78,71 @@ def build_hooks(model_base, direction, metadata, mode: str):
     raise ValueError(f"Unknown mode: {mode}")
 
 
-def generate_one(model_base, prompt: str, fwd_pre_hooks, fwd_hooks, max_new_tokens: int, temperature: float) -> str:
-    inputs = model_base.tokenize_instructions_fn(instructions=[prompt])
+def wrap_hooks_for_debug(fwd_pre_hooks, fwd_hooks):
+    counters = {"forward_pre": 0, "forward": 0}
+
+    def wrap_pre(hook):
+        def wrapped(module, input):
+            counters["forward_pre"] += 1
+            return hook(module, input)
+
+        return wrapped
+
+    def wrap_forward(hook):
+        def wrapped(module, input, output):
+            counters["forward"] += 1
+            return hook(module, input, output)
+
+        return wrapped
+
+    wrapped_pre_hooks = [(module, wrap_pre(hook)) for module, hook in fwd_pre_hooks]
+    wrapped_hooks = [(module, wrap_forward(hook)) for module, hook in fwd_hooks]
+    return wrapped_pre_hooks, wrapped_hooks, counters
+
+
+def load_history(path: str | None):
+    if path is None or not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        history = json.load(f)
+    if not isinstance(history, list):
+        raise ValueError(f"History file must contain a JSON list: {path}")
+    return history
+
+
+def save_history(path: str | None, history):
+    if path is None:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+
+def build_instruction_with_history(history, prompt: str) -> str:
+    if not history:
+        return prompt
+
+    lines = ["Conversation history:"]
+    for message in history:
+        role = "User" if message["role"] == "user" else "Assistant"
+        lines.append(f"{role}: {message['content']}")
+    lines.append(f"User: {prompt}")
+    lines.append("Assistant:")
+    return "\n\n".join(lines)
+
+
+def generate_one(
+    model_base,
+    prompt: str,
+    fwd_pre_hooks,
+    fwd_hooks,
+    max_new_tokens: int,
+    temperature: float,
+    history=None,
+    debug_hook_counters=None,
+) -> str:
+    instruction = build_instruction_with_history(history or [], prompt)
+    inputs = model_base.tokenize_instructions_fn(instructions=[instruction])
     generation_kwargs = {
         "max_new_tokens": max_new_tokens,
         "do_sample": temperature > 0,
@@ -93,10 +160,35 @@ def generate_one(model_base, prompt: str, fwd_pre_hooks, fwd_hooks, max_new_toke
         )
 
     generated = output[0, inputs.input_ids.shape[-1]:]
+    if debug_hook_counters is not None:
+        print(
+            "\nDebug hooks: "
+            f"forward_pre_calls={debug_hook_counters['forward_pre']} "
+            f"forward_calls={debug_hook_counters['forward']}"
+        )
     return model_base.tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
-def interactive_loop(model_base, fwd_pre_hooks, fwd_hooks, max_new_tokens: int, temperature: float):
+def interactive_loop(
+    model_base,
+    fwd_pre_hooks,
+    fwd_hooks,
+    max_new_tokens: int,
+    temperature: float,
+    history_path,
+    no_history,
+    clear_history,
+    debug_hook_counters,
+):
+    history = load_history(history_path)
+    if clear_history:
+        history.clear()
+        save_history(history_path, history)
+        print("History cleared at startup.")
+    elif history_path and history and not no_history:
+        print(f"Loaded {len(history)} history messages from {history_path}. Use --clear_history or :reset to start fresh.")
+    print("Commands: exit/quit/:q to leave, :reset to clear history, :history to show history.")
+
     while True:
         try:
             prompt = input("\nUser> ").strip()
@@ -105,8 +197,16 @@ def interactive_loop(model_base, fwd_pre_hooks, fwd_hooks, max_new_tokens: int, 
 
         if not prompt:
             continue
-        if prompt.lower() in {"exit", "quit"}:
+        if prompt.lower() in {"exit", "quit", ":q"}:
             break
+        if prompt == ":reset":
+            history.clear()
+            save_history(history_path, history)
+            print("History cleared.")
+            continue
+        if prompt == ":history":
+            print(json.dumps(history, ensure_ascii=False, indent=2))
+            continue
 
         response = generate_one(
             model_base=model_base,
@@ -115,8 +215,14 @@ def interactive_loop(model_base, fwd_pre_hooks, fwd_hooks, max_new_tokens: int, 
             fwd_hooks=fwd_hooks,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
+            history=[] if no_history else history,
+            debug_hook_counters=debug_hook_counters,
         )
         print(f"\nAssistant> {response}")
+        if not no_history:
+            history.append({"role": "user", "content": prompt})
+            history.append({"role": "assistant", "content": response})
+            save_history(history_path, history)
 
 
 def main():
@@ -131,9 +237,14 @@ def main():
     model_base = construct_model_base(args.model_path)
     direction, metadata = load_direction_artifacts(model_base, direction_path, metadata_path)
     fwd_pre_hooks, fwd_hooks = build_hooks(model_base, direction, metadata, args.mode)
+    debug_hook_counters = None
+    if args.debug_hooks:
+        fwd_pre_hooks, fwd_hooks, debug_hook_counters = wrap_hooks_for_debug(fwd_pre_hooks, fwd_hooks)
 
     print(f"mode={args.mode} layer={metadata['layer']} pos={metadata['pos']}")
     print(f"direction_path={direction_path}")
+    if args.debug_hooks:
+        print(f"registered_forward_pre_hooks={len(fwd_pre_hooks)} registered_forward_hooks={len(fwd_hooks)}")
 
     if args.prompt is not None:
         response = generate_one(
@@ -143,6 +254,8 @@ def main():
             fwd_hooks=fwd_hooks,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
+            history=[],
+            debug_hook_counters=debug_hook_counters,
         )
         print(response)
 
@@ -153,6 +266,10 @@ def main():
             fwd_hooks=fwd_hooks,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
+            history_path=args.history_path,
+            no_history=args.no_history,
+            clear_history=args.clear_history,
+            debug_hook_counters=debug_hook_counters,
         )
 
 

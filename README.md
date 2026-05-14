@@ -155,6 +155,41 @@ pipeline/runs/<model_alias>/
 
 ## 5. 如果你只是想拿去做推理
 
+### 只和本地原始模型聊天
+
+如果只是想加载本地 Hugging Face 模型做普通聊天测试，不使用 refusal direction，可以用：
+
+```bash
+python3 scripts/local_chat.py \
+  --model_path /root/autodl-tmp/Qwen3.5-4B-Base \
+  --interactive \
+  --max_new_tokens 4096 \
+  --history_path /root/autodl-tmp/qwen35_base_chat_history.json
+```
+
+这个脚本默认会：
+
+- 使用本地模型目录加载模型
+- 每轮生成最多 `4096` 个新 token
+- 在交互模式下保留历史上下文
+- 如果传了 `--history_path`，会把历史对话保存为 JSON，下次启动时继续加载
+
+交互命令：
+
+- `exit` / `quit` / `:q`：退出
+- `:reset`：清空历史
+- `:history`：打印当前历史
+- `:paste`：进入多行输入模式，最后单独一行输入 `:send` 发送
+
+单轮问题也可以这样跑：
+
+```bash
+python3 scripts/local_chat.py \
+  --model_path /root/autodl-tmp/Qwen3.5-4B-Base \
+  --prompt "请详细解释黎曼假设为什么重要。" \
+  --max_new_tokens 4096
+```
+
 如果目标不是重跑完整实验，而是尽快得到一个可用的“去拒绝”推理模型，推荐使用两步法。
 
 ### 第一步：准备推理方向
@@ -218,7 +253,18 @@ python -m pipeline.run_ablation_inference \
 
 ## 6. 还保留了一个简单的对比脚本
 
-如果你想快速比较原模型和干预后的差异，也可以用：
+如果你想快速比较原模型和干预后的差异，可以用 `scripts/chat_with_direction.py`。
+
+对于当前仓库里的 `Qwen3.5-4B`，现有 direction 文件已经在：
+
+```text
+pipeline/runs/Qwen3.5-4B/direction.pt
+pipeline/runs/Qwen3.5-4B/direction_metadata.json
+```
+
+因此加载 `/root/autodl-tmp/Qwen3.5-4B` 时，脚本会默认使用上面这两个文件，不需要手动传 `--direction_path`。
+
+原始模型 baseline：
 
 ```bash
 python scripts/chat_with_direction.py \
@@ -228,7 +274,7 @@ python scripts/chat_with_direction.py \
   --max_new_tokens 128
 ```
 
-或者：
+去除 refusal direction 的 ablation：
 
 ```bash
 python scripts/chat_with_direction.py \
@@ -238,11 +284,60 @@ python scripts/chat_with_direction.py \
   --max_new_tokens 128
 ```
 
+交互模式，支持历史上下文：
+
+```bash
+python scripts/chat_with_direction.py \
+  --model_path /root/autodl-tmp/Qwen3.5-4B \
+  --mode ablation \
+  --interactive \
+  --max_new_tokens 4096 \
+  --history_path /root/autodl-tmp/qwen35_ablation_chat_history.json
+```
+
+如果想每一轮都独立测试，不把上一轮对话拼进上下文，可以加：
+
+```bash
+--no_history
+```
+
+如果复用了旧的 `--history_path`，但想启动时直接清空历史，可以加：
+
+```bash
+--clear_history
+```
+
+如果怀疑 hook 没有真正生效，可以加：
+
+```bash
+--debug_hooks
+```
+
+脚本会打印注册的 hook 数量和生成时实际触发次数。对于当前 `Qwen3.5-4B`，`ablation` 模式通常会注册 32 个 forward pre hook 和 64 个 forward hook。
+
+如果要显式指定 direction 文件：
+
+```bash
+python scripts/chat_with_direction.py \
+  --model_path /root/autodl-tmp/Qwen3.5-4B \
+  --mode ablation \
+  --interactive \
+  --max_new_tokens 4096 \
+  --direction_path pipeline/runs/Qwen3.5-4B/direction.pt \
+  --direction_metadata_path pipeline/runs/Qwen3.5-4B/direction_metadata.json
+```
+
 其中：
 
 - `baseline`：原始模型
 - `ablation`：去除 refusal direction
 - `actadd`：向模型注入 direction，副作用通常更大
+
+交互命令：
+
+- `exit` / `quit` / `:q`：退出
+- `:reset`：清空历史
+- `:history`：打印当前历史
 
 ## 7. 当前实验上的经验结论
 
