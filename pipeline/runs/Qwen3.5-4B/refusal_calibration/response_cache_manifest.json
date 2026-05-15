@@ -2,10 +2,10 @@
     "response_format_version": "force_english_all_models_v3",
     "model_path": "/root/autodl-tmp/Qwen3.5-4B",
     "split_signatures": {
-        "harmful_train": "073ac7157d709a139c96f9f5ff2b17e140af8a1e974cd321e18088134696d2b2",
-        "harmless_train": "3d9b19bc86127c734a35bfbe08a59dff30956390c14a05c88b20b74a2cba6310",
-        "harmful_val": "1789b3eb60cab837ab7bf7ece42867f4071f7cdf967844480c82cc66b4a238f5",
-        "harmless_val": "28d69b64698355dced6cb8ac1f9b6a27991b1756b389c8358605508d96ed9be9"
+        "harmful_train": "386d0398d6fa94f6fa650efe95efbb228f27a367f2c63366199dde510eaaa33f",
+        "harmless_train": "00de3a9bf7af6752670646e79308551a3f1beb661acc055312d457e7dc74add7",
+        "harmful_val": "b1316a6af9e477c640876a0869ae04243c1b32ca3bbce673dedd405e47f39cc6",
+        "harmless_val": "32da2fe5b57f50d3145b93bd79e2ee47839efea5bce581bb56faffcfd9d3182f"
     },
-    "max_new_tokens": 64
+    "max_new_tokens": 512
 }

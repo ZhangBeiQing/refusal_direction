@@ -1,5 +1,5 @@
 {
     "judge_model_path": "/root/autodl-tmp/Nemotron-Content-Safety-Reasoning-4B",
     "judge_backend": "vllm",
-    "response_cache_file_digest": "1309be112ab5ab72c246f96ecfedf5047488aad1e69c8776073e2f9c2c3a01fa"
+    "response_cache_file_digest": "7c3ca1b25dae0e79e1d06baa4d71ec9b8007b485d8073dff3ad6042dc1cd6b9c"
 }

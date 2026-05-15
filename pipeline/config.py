@@ -19,7 +19,7 @@ class Config:
     refusal_eval_methodologies: Tuple[str, ...] = ("substring_matching",)
     ce_loss_batch_size: int = 2
     ce_loss_n_batches: int = 2048
-    activation_batch_size: int = 128
+    activation_batch_size: int = 64
     completion_batch_size: int = 256
     refusal_judge_model_path: Optional[str] = None
     refusal_judge_backend: str = "vllm"

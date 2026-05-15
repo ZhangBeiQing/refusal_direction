@@ -1,21 +1,48 @@
 {
     "refusal_toks": [
-        40
+        40,
+        148013,
+        2064,
+        120833
     ],
     "decoded_refusal_toks": [
-        "I"
+        "I",
+        "我无法",
+        "It",
+        "我不能"
     ],
-    "n_harmful_train": 8,
-    "n_harmful_val": 4,
-    "n_harmless_train": 8,
-    "n_harmless_val": 4,
+    "n_harmful_train": 432,
+    "n_harmful_val": 72,
+    "n_harmless_train": 37389,
+    "n_harmless_val": 12462,
     "token_summaries": [
         {
             "token_id": 40,
             "decoded": "I",
-            "refusal_count": 12,
+            "refusal_count": 262,
+            "non_refusal_count": 447,
+            "precision": 0.3695345557122708
+        },
+        {
+            "token_id": 148013,
+            "decoded": "我无法",
+            "refusal_count": 240,
+            "non_refusal_count": 94,
+            "precision": 0.718562874251497
+        },
+        {
+            "token_id": 120833,
+            "decoded": "我不能",
+            "refusal_count": 1,
             "non_refusal_count": 0,
             "precision": 1.0
+        },
+        {
+            "token_id": 2064,
+            "decoded": "It",
+            "refusal_count": 1,
+            "non_refusal_count": 127,
+            "precision": 0.0078125
         }
     ]
 }
