@@ -13,8 +13,9 @@ from pipeline.utils.hook_utils import add_hooks
 
 def get_mean_activations_pre_hook(layer, cache: Float[Tensor, "pos layer d_model"], n_samples, positions: List[int]):
     def hook_fn(module, input):
-        activation: Float[Tensor, "batch_size seq_len d_model"] = input[0].clone().to(cache)
-        cache[:, layer] += (1.0 / n_samples) * activation[:, positions, :].sum(dim=0)
+        activation: Float[Tensor, "batch_size seq_len d_model"] = input[0]
+        selected_activations = activation[:, positions, :]
+        cache[:, layer] += (1.0 / n_samples) * selected_activations.sum(dim=0, dtype=cache.dtype)
 
     return hook_fn
 
@@ -38,10 +39,11 @@ def get_mean_activations(model, tokenizer, instructions, tokenize_instructions_f
         inputs = tokenize_instructions_fn(instructions=instructions[i:i + batch_size])
 
         with add_hooks(module_forward_pre_hooks=fwd_pre_hooks, module_forward_hooks=[]):
-            model(
-                input_ids=inputs.input_ids.to(model.device),
-                attention_mask=inputs.attention_mask.to(model.device),
-            )
+            with torch.inference_mode():
+                model(
+                    input_ids=inputs.input_ids.to(model.device),
+                    attention_mask=inputs.attention_mask.to(model.device),
+                )
 
     return mean_activations
 

@@ -8,12 +8,13 @@ from pipeline.config import Config
 from pipeline.model_utils.model_factory import construct_model_base
 from pipeline.run_pipeline import calibrate_refusal_proxy, filter_data, load_and_sample_datasets
 from pipeline.submodules.generate_directions import get_mean_diff
-from pipeline.submodules.select_direction import get_last_position_logits, get_refusal_scores, kl_div_fn
+from pipeline.submodules.select_direction import get_refusal_scores, kl_div_fn
 from pipeline.utils.hook_utils import (
     get_direction_ablation_input_pre_hook,
     get_direction_ablation_output_hook,
+    add_hooks,
 )
-from pipeline.utils.logging import get_logger
+from pipeline.utils.logging import get_logger, enable_file_logging
 
 logger = get_logger("PrepareInferenceDirection")
 
@@ -82,6 +83,47 @@ def build_all_layer_ablation_hooks(model_base, direction):
     return fwd_pre_hooks, fwd_hooks
 
 
+def _get_last_position_logits_for_batch(model_base, instructions, fwd_pre_hooks=None, fwd_hooks=None):
+    if fwd_pre_hooks is None:
+        fwd_pre_hooks = []
+    if fwd_hooks is None:
+        fwd_hooks = []
+
+    tokenized = model_base.tokenize_instructions_fn(instructions=instructions)
+    with add_hooks(module_forward_pre_hooks=fwd_pre_hooks, module_forward_hooks=fwd_hooks):
+        with torch.inference_mode():
+            logits = model_base.model(
+                input_ids=tokenized.input_ids.to(model_base.model.device),
+                attention_mask=tokenized.attention_mask.to(model_base.model.device),
+            ).logits
+    return logits[:, -1, :]
+
+
+def _compute_streaming_harmless_kl_div(model_base, harmless_instructions, batch_size, fwd_pre_hooks=None, fwd_hooks=None):
+    total_kl = 0.0
+    total_examples = 0
+
+    for start_idx in range(0, len(harmless_instructions), batch_size):
+        batch_instructions = harmless_instructions[start_idx:start_idx + batch_size]
+        baseline_logits = _get_last_position_logits_for_batch(
+            model_base=model_base,
+            instructions=batch_instructions,
+        )
+        intervention_logits = _get_last_position_logits_for_batch(
+            model_base=model_base,
+            instructions=batch_instructions,
+            fwd_pre_hooks=fwd_pre_hooks,
+            fwd_hooks=fwd_hooks,
+        )
+        batch_kl = kl_div_fn(baseline_logits, intervention_logits, mask=None)
+        total_kl += batch_kl.sum().item()
+        total_examples += batch_kl.shape[0]
+
+    if total_examples == 0:
+        return 0.0
+    return total_kl / total_examples
+
+
 def select_best_ablation_direction(
     model_base,
     harmful_instructions,
@@ -103,14 +145,7 @@ def select_best_ablation_direction(
         batch_size=batch_size,
     ).mean().item()
 
-    logger.info("计算 baseline logits (harmless)...")
-    baseline_harmless_logits = get_last_position_logits(
-        model=model_base.model,
-        tokenizer=model_base.tokenizer,
-        instructions=harmless_instructions,
-        tokenize_instructions_fn=model_base.tokenize_instructions_fn,
-        batch_size=batch_size,
-    )
+    logger.info("按 batch 流式计算 harmless KL，避免缓存全量 logits...")
 
     kept_rows = []
     all_rows = []
@@ -130,16 +165,13 @@ def select_best_ablation_direction(
             batch_size=batch_size,
         ).mean().item()
 
-        harmless_logits = get_last_position_logits(
-            model=model_base.model,
-            tokenizer=model_base.tokenizer,
-            instructions=harmless_instructions,
-            tokenize_instructions_fn=model_base.tokenize_instructions_fn,
+        kl_div = _compute_streaming_harmless_kl_div(
+            model_base=model_base,
+            harmless_instructions=harmless_instructions,
+            batch_size=batch_size,
             fwd_pre_hooks=fwd_pre_hooks,
             fwd_hooks=fwd_hooks,
-            batch_size=batch_size,
         )
-        kl_div = kl_div_fn(baseline_harmless_logits, harmless_logits, mask=None).mean().item()
 
         row = {
             "position": position,
@@ -182,6 +214,7 @@ def main():
     cfg = build_config_from_args(args)
     artifact_dir = get_inference_artifact_dir(cfg, args.artifact_subdir)
     os.makedirs(artifact_dir, exist_ok=True)
+    enable_file_logging(os.path.join(artifact_dir, "logs"))
 
     logger.info("=" * 60)
     logger.info("[Stage 1/5] 加载模型...")

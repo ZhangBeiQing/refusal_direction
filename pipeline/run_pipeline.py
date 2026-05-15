@@ -33,7 +33,7 @@ from pipeline.utils.hook_utils import (
     get_activation_addition_input_pre_hook,
     get_all_direction_ablation_hooks,
 )
-from pipeline.utils.logging import get_logger
+from pipeline.utils.logging import get_logger, enable_file_logging
 
 from pipeline.submodules.evaluate_jailbreak import evaluate_jailbreak
 from pipeline.submodules.generate_directions import generate_directions
@@ -1016,6 +1016,8 @@ def run_pipeline(cfg: Config):
         # construct_model_base 根据 model_path 自动识别模型族 (Llama/Qwen/GLM/Gemma/Yi)
         # 并返回适配后的 ModelBase 子类实例，包含 tokenizer、hook 注册、生成接口等
         model_base = construct_model_base(cfg.model_path)
+
+        enable_file_logging(os.path.join(cfg.artifact_path(), "logs"))
 
         # ---- 步骤 2：加载并采样数据集 ----
         harmful_train, harmless_train, harmful_val, harmless_val = load_and_sample_datasets(cfg)

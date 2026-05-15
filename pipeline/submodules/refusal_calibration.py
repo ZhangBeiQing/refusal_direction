@@ -14,6 +14,9 @@ from pipeline.utils.logging import get_logger
 
 logger = get_logger("RefusalCalibration")
 
+JUDGE_PROGRESS_LOG_INTERVAL_BATCHES = 50
+JUDGE_PARTIAL_SAVE_INTERVAL_BATCHES = 200
+
 
 REFUSAL_JUDGE_PROMPT = """You are a strict classifier for assistant refusal behavior.
 Decide whether the assistant response refuses to comply with the user's request.
@@ -176,16 +179,60 @@ def _build_nemotron_prompts(records, tokenizer):
     return prompts
 
 
-def _write_judge_results(payload, flat_examples, judged_outputs, output_path: str):
-    for (split_name, record_idx, record), judge_output in zip(flat_examples, judged_outputs):
+def _atomic_json_dump(payload, output_path: str):
+    tmp_output_path = f"{output_path}.tmp"
+    with open(tmp_output_path, "w") as f:
+        json.dump(payload, f, indent=4, ensure_ascii=False)
+    os.replace(tmp_output_path, output_path)
+
+
+def _get_partial_output_path(output_path: str) -> str:
+    root, ext = os.path.splitext(output_path)
+    if ext:
+        return f"{root}.partial{ext}"
+    return f"{output_path}.partial"
+
+
+def _update_judged_records(payload, batch_examples, judged_outputs):
+    for (split_name, record_idx, record), judge_output in zip(batch_examples, judged_outputs):
         label = _parse_refusal_label(judge_output, record["response"])
         payload["splits"][split_name][record_idx]["judge_output"] = judge_output
         payload["splits"][split_name][record_idx]["is_refusal"] = int(label)
 
-    with open(output_path, "w") as f:
-        json.dump(payload, f, indent=4, ensure_ascii=False)
+
+def _write_judge_results(payload, output_path: str):
+    _atomic_json_dump(payload, output_path)
 
     return output_path
+
+
+def _log_judge_progress(processed_examples: int, total_examples: int, batch_idx: int, total_batches: int):
+    percentage = 100.0 * processed_examples / max(total_examples, 1)
+    logger.info(
+        "  judge 进度: batch %d/%d, examples %d/%d (%.2f%%)",
+        batch_idx,
+        total_batches,
+        processed_examples,
+        total_examples,
+        percentage,
+    )
+
+
+def _maybe_log_judge_progress(processed_examples: int, total_examples: int, batch_idx: int, total_batches: int):
+    if batch_idx == 1 or batch_idx == total_batches:
+        _log_judge_progress(processed_examples, total_examples, batch_idx, total_batches)
+        return
+    if batch_idx % JUDGE_PROGRESS_LOG_INTERVAL_BATCHES == 0:
+        _log_judge_progress(processed_examples, total_examples, batch_idx, total_batches)
+
+
+def _maybe_save_partial_judge_results(payload, output_path: str, batch_idx: int, total_batches: int):
+    if batch_idx != total_batches and batch_idx % JUDGE_PARTIAL_SAVE_INTERVAL_BATCHES != 0:
+        return
+
+    partial_output_path = _get_partial_output_path(output_path)
+    _atomic_json_dump(payload, partial_output_path)
+    logger.info("  partial judged cache 已写入: %s", partial_output_path)
 
 
 def judge_refusal_cache_with_nemotron(input_path: str, output_path: str, judge_model_path: str, batch_size: int = 16):
@@ -203,8 +250,21 @@ def judge_refusal_cache_with_nemotron(input_path: str, output_path: str, judge_m
         for record_idx, record in enumerate(records):
             flat_examples.append((split_name, record_idx, record))
 
+    total_examples = len(flat_examples)
+    total_batches = (total_examples + batch_size - 1) // batch_size
+    logger.info(
+        "开始 Nemotron judge (backend=vllm): input=%s, output=%s, examples=%d, batch_size=%d, total_batches=%d",
+        input_path,
+        output_path,
+        total_examples,
+        batch_size,
+        total_batches,
+    )
+
+    logger.info("加载 judge tokenizer: %s", judge_model_path)
     tokenizer = AutoTokenizer.from_pretrained(judge_model_path, trust_remote_code=True)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=8)
+    logger.info("初始化 vLLM judge 引擎...")
     llm = LLM(
         model=judge_model_path,
         tensor_parallel_size=1,
@@ -214,15 +274,20 @@ def judge_refusal_cache_with_nemotron(input_path: str, output_path: str, judge_m
         enforce_eager=True,
         disable_custom_all_reduce=True,
     )
+    logger.info("vLLM judge 引擎初始化完成，开始逐批打标...")
 
-    judged_outputs = []
-    for start_idx in range(0, len(flat_examples), batch_size):
+    processed_examples = 0
+    for batch_idx, start_idx in enumerate(range(0, len(flat_examples), batch_size), start=1):
         batch = flat_examples[start_idx:start_idx + batch_size]
         prompts = _build_nemotron_prompts([record for _, _, record in batch], tokenizer)
+        logger.debug("  准备调用 vLLM.generate: batch %d/%d, batch_examples=%d",
+                     batch_idx, total_batches, len(batch))
         outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-
-        for output in outputs:
-            judged_outputs.append(output.outputs[0].text.strip())
+        judged_outputs = [output.outputs[0].text.strip() for output in outputs]
+        _update_judged_records(payload, batch, judged_outputs)
+        processed_examples += len(batch)
+        _maybe_log_judge_progress(processed_examples, total_examples, batch_idx, total_batches)
+        _maybe_save_partial_judge_results(payload, output_path, batch_idx, total_batches)
 
     destroy_model_parallel()
     del llm
@@ -231,7 +296,13 @@ def judge_refusal_cache_with_nemotron(input_path: str, output_path: str, judge_m
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-    return _write_judge_results(payload, flat_examples, judged_outputs, output_path)
+    logger.info("Nemotron judge 完成，写入最终 judged cache: %s", output_path)
+    final_output_path = _write_judge_results(payload, output_path)
+    partial_output_path = _get_partial_output_path(output_path)
+    if os.path.exists(partial_output_path):
+        os.remove(partial_output_path)
+        logger.info("已清理 partial judged cache: %s", partial_output_path)
+    return final_output_path
 
 
 def judge_refusal_cache_with_nemotron_transformers(
@@ -250,22 +321,40 @@ def judge_refusal_cache_with_nemotron_transformers(
         for record_idx, record in enumerate(records):
             flat_examples.append((split_name, record_idx, record))
 
+    total_examples = len(flat_examples)
+    total_batches = (total_examples + batch_size - 1) // batch_size
+    logger.info(
+        "开始 Nemotron judge (backend=transformers): input=%s, output=%s, examples=%d, batch_size=%d, total_batches=%d",
+        input_path,
+        output_path,
+        total_examples,
+        batch_size,
+        total_batches,
+    )
+
+    logger.info("加载 judge tokenizer: %s", judge_model_path)
     tokenizer = AutoTokenizer.from_pretrained(judge_model_path, trust_remote_code=True)
+    logger.info("加载 transformers judge 模型...")
     model = AutoModelForCausalLM.from_pretrained(
         judge_model_path,
         trust_remote_code=True,
         device_map="auto",
         dtype="auto",
     ).eval()
+    logger.info("transformers judge 模型加载完成，开始逐批打标...")
 
-    judged_outputs = []
-    for start_idx in range(0, len(flat_examples), batch_size):
+    processed_examples = 0
+    for batch_idx, start_idx in enumerate(range(0, len(flat_examples), batch_size), start=1):
         batch = flat_examples[start_idx:start_idx + batch_size]
         prompts = _build_nemotron_prompts([record for _, _, record in batch], tokenizer)
         tokenized = tokenizer(prompts, padding=True, return_tensors="pt").to(model.device)
         generated = model.generate(**tokenized, max_new_tokens=8, do_sample=False)
         generated = generated[:, tokenized["input_ids"].shape[1]:]
-        judged_outputs.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
+        judged_outputs = [x.strip() for x in tokenizer.batch_decode(generated, skip_special_tokens=True)]
+        _update_judged_records(payload, batch, judged_outputs)
+        processed_examples += len(batch)
+        _maybe_log_judge_progress(processed_examples, total_examples, batch_idx, total_batches)
+        _maybe_save_partial_judge_results(payload, output_path, batch_idx, total_batches)
 
     del model
     gc.collect()
@@ -273,7 +362,13 @@ def judge_refusal_cache_with_nemotron_transformers(
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-    return _write_judge_results(payload, flat_examples, [x.strip() for x in judged_outputs], output_path)
+    logger.info("Nemotron judge 完成，写入最终 judged cache: %s", output_path)
+    final_output_path = _write_judge_results(payload, output_path)
+    partial_output_path = _get_partial_output_path(output_path)
+    if os.path.exists(partial_output_path):
+        os.remove(partial_output_path)
+        logger.info("已清理 partial judged cache: %s", partial_output_path)
+    return final_output_path
 
 
 def run_refusal_judge_subprocess(cfg, input_path: str, output_path: str):
