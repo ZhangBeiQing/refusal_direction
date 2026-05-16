@@ -2,9 +2,9 @@
     "position": -1,
     "layer": 23,
     "selection_method": "ablation_only",
-    "baseline_refusal_score": 4.598155498504639,
-    "refusal_score": -10.12982177734375,
-    "kl_div_score": 0.03658459294466853,
+    "baseline_refusal_score": 3.7442240715026855,
+    "refusal_score": -6.880829811096191,
+    "kl_div_score": 0.005372977994662214,
     "kl_threshold": 0.1,
     "prune_layer_percentage": 0.2
 }

@@ -6,7 +6,14 @@ import torch
 
 from pipeline.config import Config
 from pipeline.model_utils.model_factory import construct_model_base
-from pipeline.run_pipeline import calibrate_refusal_proxy, filter_data, load_and_sample_datasets
+from pipeline.run_pipeline import (
+    _instruction_list_signature,
+    _manifest_matches,
+    _write_manifest,
+    calibrate_refusal_proxy,
+    filter_data,
+    load_and_sample_datasets,
+)
 from pipeline.submodules.generate_directions import get_mean_diff
 from pipeline.submodules.select_direction import get_refusal_scores, kl_div_fn
 from pipeline.utils.hook_utils import (
@@ -17,6 +24,8 @@ from pipeline.utils.hook_utils import (
 from pipeline.utils.logging import get_logger, enable_file_logging
 
 logger = get_logger("PrepareInferenceDirection")
+
+HARMLESS_KL_PROGRESS_LOG_INTERVAL_BATCHES = 10
 
 
 def parse_arguments():
@@ -99,31 +108,6 @@ def _get_last_position_logits_for_batch(model_base, instructions, fwd_pre_hooks=
     return logits[:, -1, :]
 
 
-def _compute_streaming_harmless_kl_div(model_base, harmless_instructions, batch_size, fwd_pre_hooks=None, fwd_hooks=None):
-    total_kl = 0.0
-    total_examples = 0
-
-    for start_idx in range(0, len(harmless_instructions), batch_size):
-        batch_instructions = harmless_instructions[start_idx:start_idx + batch_size]
-        baseline_logits = _get_last_position_logits_for_batch(
-            model_base=model_base,
-            instructions=batch_instructions,
-        )
-        intervention_logits = _get_last_position_logits_for_batch(
-            model_base=model_base,
-            instructions=batch_instructions,
-            fwd_pre_hooks=fwd_pre_hooks,
-            fwd_hooks=fwd_hooks,
-        )
-        batch_kl = kl_div_fn(baseline_logits, intervention_logits, mask=None)
-        total_kl += batch_kl.sum().item()
-        total_examples += batch_kl.shape[0]
-
-    if total_examples == 0:
-        return 0.0
-    return total_kl / total_examples
-
-
 def select_best_ablation_direction(
     model_base,
     harmful_instructions,
@@ -147,14 +131,14 @@ def select_best_ablation_direction(
 
     logger.info("按 batch 流式计算 harmless KL，避免缓存全量 logits...")
 
-    kept_rows = []
-    all_rows = []
+    harmful_refusal_by_layer = []
+    layer_hooks = []
 
     for layer in range(n_layers):
         direction = candidate_directions[layer]
-        logger.debug("评估 layer=%d/%d ...", layer, n_layers)
+        logger.debug("计算 harmful refusal: layer=%d/%d ...", layer, n_layers)
         fwd_pre_hooks, fwd_hooks = build_all_layer_ablation_hooks(model_base, direction)
-
+        layer_hooks.append((fwd_pre_hooks, fwd_hooks))
         harmful_refusal = get_refusal_scores(
             model_base.model,
             harmful_instructions,
@@ -164,14 +148,45 @@ def select_best_ablation_direction(
             fwd_hooks=fwd_hooks,
             batch_size=batch_size,
         ).mean().item()
+        harmful_refusal_by_layer.append(harmful_refusal)
 
-        kl_div = _compute_streaming_harmless_kl_div(
-            model_base=model_base,
-            harmless_instructions=harmless_instructions,
+    kl_sums = [0.0 for _ in range(n_layers)]
+    total_harmless_examples = 0
+    total_harmless_batches = (len(harmless_instructions) + batch_size - 1) // batch_size
+
+    for batch_idx, start_idx in enumerate(range(0, len(harmless_instructions), batch_size), start=1):
+        batch_instructions = harmless_instructions[start_idx:start_idx + batch_size]
+        _maybe_log_harmless_kl_progress(
+            batch_idx=batch_idx,
+            total_batches=total_harmless_batches,
+            batch_start=start_idx,
             batch_size=batch_size,
-            fwd_pre_hooks=fwd_pre_hooks,
-            fwd_hooks=fwd_hooks,
+            total_examples=len(harmless_instructions),
         )
+        baseline_logits = _get_last_position_logits_for_batch(
+            model_base=model_base,
+            instructions=batch_instructions,
+        )
+        total_harmless_examples += baseline_logits.shape[0]
+
+        for layer in range(n_layers):
+            fwd_pre_hooks, fwd_hooks = layer_hooks[layer]
+            intervention_logits = _get_last_position_logits_for_batch(
+                model_base=model_base,
+                instructions=batch_instructions,
+                fwd_pre_hooks=fwd_pre_hooks,
+                fwd_hooks=fwd_hooks,
+            )
+            batch_kl = kl_div_fn(baseline_logits, intervention_logits, mask=None)
+            kl_sums[layer] += batch_kl.sum().item()
+
+    kept_rows = []
+    all_rows = []
+
+    for layer in range(n_layers):
+        logger.debug("评估 layer=%d/%d ...", layer, n_layers)
+        harmful_refusal = harmful_refusal_by_layer[layer]
+        kl_div = kl_sums[layer] / max(total_harmless_examples, 1)
 
         row = {
             "position": position,
@@ -207,6 +222,49 @@ def _format_count(items):
     if isinstance(items, int):
         return items
     return len(items)
+
+
+def _load_or_compute_mean_diff(cfg, model_base, harmful_train, harmless_train, position, artifact_dir):
+    mean_diff_path = os.path.join(artifact_dir, "mean_diff.pt")
+    manifest_path = os.path.join(artifact_dir, "mean_diff_manifest.json")
+    manifest = {
+        "model_path": cfg.model_path,
+        "position": position,
+        "harmful_train_signature": _instruction_list_signature(harmful_train),
+        "harmless_train_signature": _instruction_list_signature(harmless_train),
+    }
+
+    if os.path.exists(mean_diff_path) and _manifest_matches(manifest_path, manifest):
+        logger.info("  复用已有 mean_diff 缓存: %s", mean_diff_path)
+        return torch.load(mean_diff_path, map_location=model_base.model.device)
+
+    mean_diff = get_mean_diff(
+        model=model_base.model,
+        tokenizer=model_base.tokenizer,
+        harmful_instructions=harmful_train,
+        harmless_instructions=harmless_train,
+        tokenize_instructions_fn=model_base.tokenize_instructions_fn,
+        block_modules=model_base.model_block_modules,
+        batch_size=cfg.activation_batch_size,
+        positions=[position],
+    )[0]
+    torch.save(mean_diff, mean_diff_path)
+    _write_manifest(manifest_path, manifest)
+    logger.info("  mean_diff 已写入: %s", mean_diff_path)
+    return mean_diff
+
+
+def _maybe_log_harmless_kl_progress(batch_idx, total_batches, batch_start, batch_size, total_examples):
+    if batch_idx == 1 or batch_idx == total_batches or batch_idx % HARMLESS_KL_PROGRESS_LOG_INTERVAL_BATCHES == 0:
+        batch_end = min(batch_start + batch_size, total_examples)
+        logger.info(
+            "  harmless KL 进度: batch %d/%d, examples [%d:%d)/%d",
+            batch_idx,
+            total_batches,
+            batch_start,
+            batch_end,
+            total_examples,
+        )
 
 
 def main():
@@ -270,16 +328,14 @@ def main():
     logger.info("  position=%d  batch_size=%d", args.position, cfg.activation_batch_size)
     logger.info("  harmful 指令数=%d  harmless 指令数=%d",
                 _format_count(harmful_train), _format_count(harmless_train))
-    mean_diff = get_mean_diff(
-        model=model_base.model,
-        tokenizer=model_base.tokenizer,
-        harmful_instructions=harmful_train,
-        harmless_instructions=harmless_train,
-        tokenize_instructions_fn=model_base.tokenize_instructions_fn,
-        block_modules=model_base.model_block_modules,
-        batch_size=cfg.activation_batch_size,
-        positions=[args.position],
-    )[0]
+    mean_diff = _load_or_compute_mean_diff(
+        cfg=cfg,
+        model_base=model_base,
+        harmful_train=harmful_train,
+        harmless_train=harmless_train,
+        position=args.position,
+        artifact_dir=artifact_dir,
+    )
     logger.info("  mean_diff shape=%s", mean_diff.shape)
 
     logger.info("[Stage 5/5] 选择最优 ablation direction (共 %d 层)...", mean_diff.shape[0])
